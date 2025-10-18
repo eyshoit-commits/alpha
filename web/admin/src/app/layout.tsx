@@ -52,6 +52,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/blockchain" className="rounded-lg border-2 border-[#5bec92]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#5bec92] hover:bg-[#5bec92]/20 hover:text-[#5bec92] hover:border-[#5bec92] hover:shadow-lg hover:shadow-[#5bec92]/30 transition-all">
                   🔗 Blockchain
                 </Link>
+                <Link href="/wallet" className="rounded-lg border-2 border-[#D3188C]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#D3188C] hover:bg-[#D3188C]/20 hover:text-[#D3188C] hover:border-[#D3188C] hover:shadow-lg hover:shadow-[#D3188C]/30 transition-all">
+                  💰 Wallet
+                </Link>
+                <Link href="/explorer" className="rounded-lg border-2 border-[#75ffaf]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#75ffaf] hover:bg-[#75ffaf]/20 hover:text-[#75ffaf] hover:border-[#75ffaf] hover:shadow-lg hover:shadow-[#75ffaf]/30 transition-all">
+                  🔍 Explorer
+                </Link>
               </nav>
             </header>
             <main className="mx-auto max-w-screen-2xl">{children}</main>
