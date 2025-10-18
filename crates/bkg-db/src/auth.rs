@@ -1,11 +1,11 @@
-//! Query planner scaffolding for bkg-db.
+//! Authentication scaffolding for bkg-db.
 
 #![allow(dead_code)]
 
 #[derive(Debug, Default, Clone)]
-pub struct PlannerDraft;
+pub struct AuthBlueprint;
 
-impl PlannerDraft {
+impl AuthBlueprint {
     pub fn new() -> Self {
         Self
     }

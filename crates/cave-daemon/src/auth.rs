@@ -1,12 +1,12 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
+use bkg_db::{ApiKeyRecord, ApiKeyScope as DbScope, Database};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,25 +44,14 @@ pub enum AuthError {
     NotFound,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthService {
-    state: Arc<RwLock<AuthState>>,
-}
-
-#[derive(Default)]
-struct AuthState {
-    keys: HashMap<Uuid, KeyRecord>,
-    index: HashMap<String, Uuid>,
-}
-
-struct KeyRecord {
-    info: KeyInfo,
-    hash: String,
+    db: Database,
 }
 
 impl AuthService {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(db: Database) -> Self {
+        Self { db }
     }
 
     pub async fn issue_key(
@@ -76,25 +65,22 @@ impl AuthService {
         let now = Utc::now();
         let expires_at = ttl.map(|dur| now + ChronoDuration::from_std(dur).unwrap_or_default());
 
-        let info = KeyInfo {
-            id: Uuid::new_v4(),
-            scope,
-            rate_limit,
-            created_at: now,
-            last_used_at: None,
-            expires_at,
-            key_prefix: token[..12.min(token.len())].to_string(),
-        };
+        let token_prefix: String = token.chars().take(12).collect();
+        let record = self
+            .db
+            .insert_api_key(
+                &hash,
+                &token_prefix,
+                scope_to_db_scope(&scope),
+                rate_limit,
+                expires_at,
+            )
+            .await?;
 
-        let mut guard = self.state.write().await;
-        guard.index.insert(hash.clone(), info.id);
-        guard.keys.insert(
-            info.id,
-            KeyRecord {
-                info: info.clone(),
-                hash,
-            },
-        );
+        let mut info = key_info_from_record(record);
+        info.key_prefix = token_prefix;
+        info.scope = scope;
+        info.created_at = now;
 
         Ok(IssuedKey { token, info })
     }
@@ -104,47 +90,67 @@ impl AuthService {
         token: &str,
         requirement: ScopeRequirement<'a>,
     ) -> Result<KeyInfo, AuthError> {
-        let mut guard = self.state.write().await;
         let hash = hash_token(token);
 
-        let key_id = guard
-            .index
-            .get(&hash)
-            .cloned()
+        let mut record = self
+            .db
+            .find_api_key_by_hash(&hash)
+            .await
+            .map_err(|_| AuthError::InvalidToken)?
             .ok_or(AuthError::InvalidToken)?;
-        let record = guard.keys.get_mut(&key_id).ok_or(AuthError::InvalidToken)?;
 
-        if let Some(expiry) = record.info.expires_at {
+        if record.revoked {
+            return Err(AuthError::InvalidToken);
+        }
+
+        if let Some(expiry) = record.expires_at {
             if expiry < Utc::now() {
-                guard.index.remove(&hash);
-                guard.keys.remove(&key_id);
                 return Err(AuthError::InvalidToken);
             }
         }
 
-        if !requirement.matches(&record.info.scope) {
+        let info_scope = scope_from_db_scope(record.scope.clone());
+        if !requirement.matches(&info_scope) {
             return Err(AuthError::Unauthorized);
         }
 
-        record.info.last_used_at = Some(Utc::now());
-        Ok(record.info.clone())
+        let now = Utc::now();
+        self.db
+            .touch_api_key_usage(record.id, now)
+            .await
+            .map_err(|_| AuthError::InvalidToken)?;
+
+        record.last_used_at = Some(now);
+        let mut info = key_info_from_record(record);
+        info.scope = info_scope;
+        info.last_used_at = Some(now);
+        Ok(info)
     }
 
-    pub async fn list_keys(&self) -> Vec<KeyInfo> {
-        let guard = self.state.read().await;
-        guard.keys.values().map(|rec| rec.info.clone()).collect()
+    pub async fn list_keys(&self) -> Result<Vec<KeyInfo>> {
+        let records = self.db.list_api_keys().await?;
+        Ok(records.into_iter().map(key_info_from_record).collect())
     }
 
     pub async fn revoke(&self, id: Uuid) -> Result<(), AuthError> {
-        let mut guard = self.state.write().await;
-        let record = guard.keys.remove(&id).ok_or(AuthError::NotFound)?;
-        guard.index.remove(&record.hash);
-        Ok(())
+        if self
+            .db
+            .fetch_api_key(id)
+            .await
+            .map_err(|_| AuthError::NotFound)?
+            .is_none()
+        {
+            return Err(AuthError::NotFound);
+        }
+
+        self.db
+            .revoke_api_key(id)
+            .await
+            .map_err(|_| AuthError::NotFound)
     }
 
-    pub async fn has_keys(&self) -> bool {
-        let guard = self.state.read().await;
-        !guard.keys.is_empty()
+    pub async fn has_keys(&self) -> Result<bool> {
+        Ok(!self.db.list_api_keys().await?.is_empty())
     }
 }
 
@@ -177,4 +183,43 @@ fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn scope_to_db_scope(scope: &KeyScope) -> DbScope {
+    match scope {
+        KeyScope::Admin => DbScope::Admin,
+        KeyScope::Namespace { namespace } => DbScope::Namespace {
+            namespace: namespace.clone(),
+        },
+    }
+}
+
+fn scope_from_db_scope(scope: DbScope) -> KeyScope {
+    match scope {
+        DbScope::Admin => KeyScope::Admin,
+        DbScope::Namespace { namespace } => KeyScope::Namespace { namespace },
+    }
+}
+
+fn key_info_from_record(record: ApiKeyRecord) -> KeyInfo {
+    let ApiKeyRecord {
+        id,
+        token_prefix,
+        scope,
+        rate_limit,
+        created_at,
+        last_used_at,
+        expires_at,
+        revoked: _,
+    } = record;
+
+    KeyInfo {
+        id,
+        scope: scope_from_db_scope(scope),
+        rate_limit,
+        created_at,
+        last_used_at,
+        expires_at,
+        key_prefix: token_prefix,
+    }
 }

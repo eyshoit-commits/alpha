@@ -5,17 +5,17 @@
 //! ab und dient gleichzeitig als Ausgangspunkt für den vollständigen bkg-db
 //! Stack (siehe `docs/bkg-db.md`).
 
-pub mod kernel;
-pub mod sql;
-pub mod planner;
-pub mod executor;
-pub mod rls;
-pub mod auth;
 pub mod api;
+pub mod audit;
+pub mod auth;
+pub mod executor;
+pub mod kernel;
+pub mod planner;
 pub mod realtime;
+pub mod rls;
+pub mod sql;
 pub mod storage;
 pub mod telemetry;
-pub mod audit;
 
 use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
@@ -76,6 +76,93 @@ impl Database {
     /// queries (e.g. reporting or background tasks).
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Retrieves an API key by identifier.
+    pub async fn fetch_api_key(&self, id: Uuid) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query("SELECT * FROM api_keys WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(map_api_key).transpose()
+    }
+
+    /// Persists a hashed API key and returns the stored record metadata.
+    pub async fn insert_api_key(
+        &self,
+        token_hash: &str,
+        token_prefix: &str,
+        scope: ApiKeyScope,
+        rate_limit: u32,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiKeyRecord> {
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        let (scope_type, scope_namespace) = scope.columns();
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (
+                id, token_hash, token_prefix, scope_type, scope_namespace,
+                rate_limit, created_at, expires_at, revoked
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(token_hash)
+        .bind(token_prefix)
+        .bind(scope_type)
+        .bind(scope_namespace)
+        .bind(rate_limit as i64)
+        .bind(now.to_rfc3339())
+        .bind(expires_at.map(|v| v.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+
+        self.fetch_api_key(id)
+            .await?
+            .ok_or_else(|| anyhow!("api key inserted but missing when reloaded ({id})"))
+    }
+
+    /// Retrieves an API key by its hashed token value (sha256).
+    pub async fn find_api_key_by_hash(&self, token_hash: &str) -> Result<Option<ApiKeyRecord>> {
+        let row = sqlx::query("SELECT * FROM api_keys WHERE token_hash = ?")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(map_api_key).transpose()
+    }
+
+    /// Returns metadata for all stored API keys (including revoked entries).
+    pub async fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
+        let mut rows =
+            sqlx::query("SELECT * FROM api_keys ORDER BY created_at DESC").fetch(&self.pool);
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_api_key(row)?);
+        }
+        Ok(out)
+    }
+
+    /// Marks an API key as revoked.
+    pub async fn revoke_api_key(&self, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Updates the `last_used_at` timestamp once authorization succeeds.
+    pub async fn touch_api_key_usage(&self, id: Uuid, timestamp: DateTime<Utc>) -> Result<()> {
+        sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
+            .bind(timestamp.to_rfc3339())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Registers a new sandbox in the catalog and returns the persisted record.
@@ -315,6 +402,30 @@ fn map_execution(row: SqliteRow) -> Result<ExecutionRecord> {
     })
 }
 
+fn map_api_key(row: SqliteRow) -> Result<ApiKeyRecord> {
+    let id: String = row.try_get("id")?;
+    let scope_type: String = row.try_get("scope_type")?;
+    let scope_namespace: Option<String> = row.try_get("scope_namespace")?;
+    let scope = ApiKeyScope::try_from_columns(scope_type, scope_namespace)?;
+
+    Ok(ApiKeyRecord {
+        id: Uuid::parse_str(&id)?,
+        token_prefix: row.try_get("token_prefix")?,
+        scope,
+        rate_limit: row.try_get::<i64, _>("rate_limit")? as u32,
+        created_at: parse_datetime(row.try_get("created_at")?)?,
+        last_used_at: row
+            .try_get::<Option<String>, _>("last_used_at")?
+            .map(parse_datetime)
+            .transpose()?,
+        expires_at: row
+            .try_get::<Option<String>, _>("expires_at")?
+            .map(parse_datetime)
+            .transpose()?,
+        revoked: row.try_get::<i64, _>("revoked")? != 0,
+    })
+}
+
 /// Errors returned by the database layer.
 #[derive(Debug, Error, Clone)]
 pub enum SandboxError {
@@ -419,6 +530,46 @@ pub struct ExecutionRecord {
     pub timed_out: bool,
 }
 
+/// Persistent representation of API key scope (admin or namespace bounded).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ApiKeyScope {
+    Admin,
+    Namespace { namespace: String },
+}
+
+impl ApiKeyScope {
+    fn columns(&self) -> (&'static str, Option<&str>) {
+        match self {
+            ApiKeyScope::Admin => ("admin", None),
+            ApiKeyScope::Namespace { namespace } => ("namespace", Some(namespace.as_str())),
+        }
+    }
+
+    fn try_from_columns(scope_type: String, scope_namespace: Option<String>) -> Result<Self> {
+        match scope_type.as_str() {
+            "admin" => Ok(ApiKeyScope::Admin),
+            "namespace" => scope_namespace
+                .map(|ns| ApiKeyScope::Namespace { namespace: ns })
+                .ok_or_else(|| anyhow!("namespace scope missing namespace value")),
+            other => Err(anyhow!("unknown api key scope: {other}")),
+        }
+    }
+}
+
+/// Stored metadata for issued API keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApiKeyRecord {
+    pub id: Uuid,
+    pub token_prefix: String,
+    pub scope: ApiKeyScope,
+    pub rate_limit: u32,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked: bool,
+}
+
 /// High-level sandbox lifecycle statuses persisted in the DB (also used in API responses).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -506,6 +657,7 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     const TEST_DB_URL: &str = "sqlite::memory:";
 
@@ -581,5 +733,33 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].stdout, entry.stdout);
+    }
+
+    #[tokio::test]
+    async fn api_key_persistence_roundtrip() {
+        let db = setup_db().await;
+        let scope = ApiKeyScope::Namespace {
+            namespace: "team-alpha".into(),
+        };
+
+        let record = db
+            .insert_api_key("hash-123", "hash-prefix", scope.clone(), 100, None)
+            .await
+            .unwrap();
+
+        assert_eq!(record.scope, scope);
+        assert_eq!(record.rate_limit, 100);
+        assert!(!record.revoked);
+
+        let fetched = db.find_api_key_by_hash("hash-123").await.unwrap().unwrap();
+
+        assert_eq!(fetched.id, record.id);
+
+        db.touch_api_key_usage(record.id, Utc::now()).await.unwrap();
+        db.revoke_api_key(record.id).await.unwrap();
+
+        let updated = db.fetch_api_key(record.id).await.unwrap().unwrap();
+        assert!(updated.revoked);
+        assert!(updated.last_used_at.is_some());
     }
 }

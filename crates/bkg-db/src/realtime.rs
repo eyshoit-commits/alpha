@@ -1,11 +1,11 @@
-//! Query planner scaffolding for bkg-db.
+//! Realtime/CDC scaffolding for bkg-db.
 
 #![allow(dead_code)]
 
 #[derive(Debug, Default, Clone)]
-pub struct PlannerDraft;
+pub struct RealtimeBlueprint;
 
-impl PlannerDraft {
+impl RealtimeBlueprint {
     pub fn new() -> Self {
         Self
     }

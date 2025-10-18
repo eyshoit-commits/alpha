@@ -1,11 +1,11 @@
-//! Query planner scaffolding for bkg-db.
+//! Telemetry scaffolding for bkg-db.
 
 #![allow(dead_code)]
 
 #[derive(Debug, Default, Clone)]
-pub struct PlannerDraft;
+pub struct TelemetryBlueprint;
 
-impl PlannerDraft {
+impl TelemetryBlueprint {
     pub fn new() -> Self {
         Self
     }

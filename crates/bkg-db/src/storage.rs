@@ -1,11 +1,11 @@
-//! Query planner scaffolding for bkg-db.
+//! Objekt-Storage scaffolding for bkg-db.
 
 #![allow(dead_code)]
 
 #[derive(Debug, Default, Clone)]
-pub struct PlannerDraft;
+pub struct StorageBlueprint;
 
-impl PlannerDraft {
+impl StorageBlueprint {
     pub fn new() -> Self {
         Self
     }

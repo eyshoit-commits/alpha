@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         .context("initializing sandbox runtime")?;
 
     let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
-    let auth = Arc::new(AuthService::new());
+    let auth = Arc::new(AuthService::new(db.clone()));
     let state = Arc::new(AppState { kernel, db, auth });
 
     let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
@@ -428,7 +428,7 @@ async fn issue_key(
     Json(payload): Json<CreateKeyBody>,
 ) -> Result<Json<IssuedKeyResponse>, ApiError> {
     let maybe_token = bearer_optional(&headers)?;
-    if state.auth.has_keys().await {
+    if state.auth.has_keys().await.map_err(ApiError::internal)? {
         let token = maybe_token
             .ok_or_else(|| ApiError::unauthorized("missing Authorization bearer token"))?;
         state
@@ -448,7 +448,7 @@ async fn issue_key(
         .auth
         .issue_key(scope, payload.rate_limit.unwrap_or(100), ttl)
         .await
-        .map_err(|err| ApiError::internal(err))?;
+        .map_err(ApiError::internal)?;
 
     Ok(Json(IssuedKeyResponse {
         token: issued.token,
@@ -466,7 +466,7 @@ async fn list_keys(
         .await
         .map_err(ApiError::from)?;
 
-    let keys = state.auth.list_keys().await;
+    let keys = state.auth.list_keys().await.map_err(ApiError::internal)?;
     Ok(Json(keys))
 }
 

@@ -1,11 +1,11 @@
-//! Query planner scaffolding for bkg-db.
+//! Row-Level Security scaffolding for bkg-db.
 
 #![allow(dead_code)]
 
 #[derive(Debug, Default, Clone)]
-pub struct PlannerDraft;
+pub struct RlsEngineDraft;
 
-impl PlannerDraft {
+impl RlsEngineDraft {
     pub fn new() -> Self {
         Self
     }
