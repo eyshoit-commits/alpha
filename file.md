@@ -16,7 +16,7 @@
 │   │   └── src/lib.rs
 │   ├── cave-daemon/
 │   │   ├── Cargo.toml
-│   │   └── src/{auth.rs,main.rs}
+│   │   └── src/{auth.rs,lib.rs,main.rs,server.rs,bin/export-openapi.rs}
 │   └── cave-kernel/
 │       ├── Cargo.toml
 │       └── src/{isolation.rs,lib.rs}
