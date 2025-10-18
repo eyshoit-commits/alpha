@@ -31,9 +31,10 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
+    any::{AnyPoolOptions, AnyRow},
     migrate::MigrateError,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
-    Row, SqlitePool,
+    AnyPool, Row, SqlitePool,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -984,7 +985,7 @@ fn map_api_key(row: AnyRow) -> Result<ApiKeyRecord> {
         revoked: row.try_get::<i64, _>("revoked")? != 0,
         rotated_from: row
             .try_get::<Option<String>, _>("rotated_from")?
-            .map(|value| Uuid::parse_str(&value))
+            .map(|value| Uuid::parse_str(value.as_str()))
             .transpose()?,
         rotated_at: row
             .try_get::<Option<String>, _>("rotated_at")?
