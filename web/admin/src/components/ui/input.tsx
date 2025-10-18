@@ -11,9 +11,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
     return (
       <div className="flex flex-col">
         {label && (
-          <label className="mb-2 text-sm font-bold text-[#75ffaf]">
+          <label className="mb-2 text-base font-bold text-[#75ffaf]">
             {label}
-            {required && <span className="ml-1 text-[#EC5800]">*</span>}
+            {required && <span className="ml-1 text-[#D3188C]">*</span>}
           </label>
         )}
         <input

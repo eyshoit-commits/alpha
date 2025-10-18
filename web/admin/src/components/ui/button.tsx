@@ -10,9 +10,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-gradient-to-r from-[#AF75FF] to-[#EC5800] text-white hover:from-[#AF75FF]/90 hover:to-[#EC5800]/90 focus:ring-[#AF75FF] shadow-lg shadow-[#EC5800]/50 hover:shadow-[#EC5800]/70 font-bold",
+  primary: "bg-gradient-to-r from-[#AF75FF] to-[#D3188C] text-white hover:from-[#AF75FF]/90 hover:to-[#D3188C]/90 focus:ring-[#AF75FF] shadow-lg shadow-[#D3188C]/50 hover:shadow-[#D3188C]/70 font-bold text-lg",
   secondary: "bg-[#1a1f3a] text-[#75ffaf] border-2 border-[#75ffaf]/60 hover:bg-[#2d3561] hover:border-[#75ffaf] hover:shadow-lg hover:shadow-[#75ffaf]/40 focus:ring-[#75ffaf] font-semibold",
-  danger: "bg-gradient-to-r from-red-600 to-[#EC5800] text-white hover:from-red-500 hover:to-[#EC5800]/90 focus:ring-red-400 shadow-lg shadow-red-500/50",
+  danger: "bg-gradient-to-r from-red-600 to-[#D3188C] text-white hover:from-red-500 hover:to-[#D3188C]/90 focus:ring-red-400 shadow-lg shadow-red-500/50 text-lg",
   ghost: "text-[#AF75FF] hover:bg-[#1a1f3a] hover:text-[#75ffaf] focus:ring-[#AF75FF]",
 };
 

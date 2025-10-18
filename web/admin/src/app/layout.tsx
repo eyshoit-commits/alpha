@@ -23,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <header className="border-b-2 border-[#5bec92]/60 bg-gradient-to-r from-[#12172f] via-[#1a1f3a] to-[#12172f] px-6 py-4 shadow-lg shadow-[#5bec92]/30">
               <div className="mx-auto flex max-w-screen-2xl items-center justify-between">
                 <div>
-                  <h1 className="text-3xl font-black bg-gradient-to-r from-[#75ffaf] via-[#AF75FF] to-[#EC5800] bg-clip-text text-transparent tracking-tight">
+                  <h1 className="text-4xl font-black bg-gradient-to-r from-[#75ffaf] via-[#AF75FF] to-[#D3188C] bg-clip-text text-transparent tracking-tight">
                     ⚡ CAVE ADMIN
                   </h1>
                   <p className="text-sm text-slate-400 mt-1">Premium Sandbox Management Platform</p>
@@ -31,7 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <TokenForm />
               </div>
               <nav className="mx-auto mt-4 flex max-w-screen-2xl gap-3">
-                <Link href="/" className="group relative rounded-lg bg-gradient-to-r from-[#AF75FF] to-[#EC5800] px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-[#EC5800]/50 hover:shadow-[#EC5800]/70 transition-all">
+                <Link href="/" className="group relative rounded-lg bg-gradient-to-r from-[#AF75FF] to-[#D3188C] px-5 py-2.5 text-base font-bold text-white shadow-lg shadow-[#D3188C]/50 hover:shadow-[#D3188C]/70 transition-all">
                   <span className="relative z-10">🏠 Overview</span>
                 </Link>
                 <Link href="/sandboxes" className="rounded-lg border-2 border-[#AF75FF]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#AF75FF] hover:bg-[#AF75FF]/20 hover:text-[#AF75FF] hover:border-[#AF75FF] hover:shadow-lg hover:shadow-[#AF75FF]/30 transition-all">

@@ -54,7 +54,7 @@ export function TokenForm({ label = "Daemon API token", showClear = true, onSave
         </button>
         <button
           type="submit"
-          className="rounded-lg bg-gradient-to-r from-purple-600 to-pink-600 px-5 py-2 text-sm font-bold text-white shadow-lg shadow-purple-500/50 hover:shadow-purple-400/60 hover:from-purple-500 hover:to-pink-500 transition-all"
+          className="rounded-lg bg-gradient-to-r from-[#AF75FF] to-[#D3188C] px-5 py-2 text-base font-bold text-white shadow-lg shadow-[#D3188C]/50 hover:shadow-[#D3188C]/70 hover:from-[#AF75FF]/90 hover:to-[#D3188C]/90 transition-all"
         >
           💾 Save token
         </button>
