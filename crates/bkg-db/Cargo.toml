@@ -19,6 +19,7 @@ tokio.workspace = true
 uuid.workspace = true
 futures.workspace = true
 sqlparser.workspace = true
+jsonwebtoken.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,8 +4,8 @@
 
 use anyhow::{anyhow, Result};
 use sqlparser::ast::{
-    Assignment, BinaryOperator, Expr, FunctionArgExpr, ObjectName, Query, SelectItem, SetExpr,
-    Statement, TableFactor, TableWithJoins,
+    Assignment, BinaryOperator, Expr, FunctionArg, FunctionArgExpr, ObjectName, Query, SelectItem,
+    SetExpr, Statement, TableFactor, TableWithJoins,
 };
 
 use crate::executor::ScalarValue;
@@ -289,7 +289,7 @@ fn parse_filter(expr: &Expr) -> Result<Option<FilterExpr>> {
                 (Expr::Identifier(ident), value) => Ok(Some(FilterExpr {
                     kind: FilterKind::Comparison {
                         column: ident.value.clone(),
-                        op: map_operator(*op),
+                        op: map_operator(op),
                         value: value_to_scalar(value)?,
                     },
                 })),
@@ -311,7 +311,10 @@ fn detect_aggregate(projection: &[SelectItem]) -> Result<Option<AggregatePlan>> 
             if func.name.0.len() == 1
                 && func.name.0[0].value.eq_ignore_ascii_case("count")
                 && func.args.len() == 1
-                && matches!(func.args[0], FunctionArgExpr::Wildcard)
+                && matches!(
+                    func.args[0],
+                    FunctionArg::Unnamed(FunctionArgExpr::Wildcard)
+                )
             {
                 Ok(Some(AggregatePlan::CountStar))
             } else {
@@ -322,7 +325,7 @@ fn detect_aggregate(projection: &[SelectItem]) -> Result<Option<AggregatePlan>> 
     }
 }
 
-fn map_operator(op: BinaryOperator) -> ComparisonOp {
+fn map_operator(op: &BinaryOperator) -> ComparisonOp {
     match op {
         BinaryOperator::Eq => ComparisonOp::Eq,
         BinaryOperator::NotEq => ComparisonOp::NotEq,

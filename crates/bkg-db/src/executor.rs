@@ -42,15 +42,6 @@ struct TableData {
     rows: Vec<Vec<ScalarValue>>,
 }
 
-impl TableData {
-    fn column_index(&self, column: &str) -> Result<usize> {
-        self.columns
-            .iter()
-            .position(|c| c == column)
-            .ok_or_else(|| anyhow!("column '{column}' not found"))
-    }
-}
-
 /// Placeholder execution result structure.
 #[derive(Debug, Default, Clone)]
 pub struct ExecutionResult {
@@ -161,9 +152,11 @@ fn execute_select(
         .get(table)
         .ok_or_else(|| anyhow!("table '{table}' not found"))?;
 
+    let prepared_filter = prepare_filter(&entry.columns, filter)?;
+
     let mut matched_rows = Vec::new();
     for row in &entry.rows {
-        if filter_allows_row(entry, row, filter)? {
+        if filter_matches(&prepared_filter, row)? {
             matched_rows.push(row.clone());
         }
     }
@@ -197,15 +190,17 @@ fn execute_update(
         .get_mut(table)
         .ok_or_else(|| anyhow!("table '{table}' not found"))?;
 
+    let prepared_filter = prepare_filter(&entry.columns, filter)?;
+
     let mut indexed_assignments = Vec::new();
     for (column, value) in assignments {
-        let idx = entry.column_index(column)?;
+        let idx = find_column_index(&entry.columns, column)?;
         indexed_assignments.push((idx, value.clone()));
     }
 
     let mut affected = 0u64;
     for row in entry.rows.iter_mut() {
-        if filter_allows_row(entry, row, filter)? {
+        if filter_matches(&prepared_filter, row)? {
             for (idx, value) in &indexed_assignments {
                 row[*idx] = value.clone();
             }
@@ -241,11 +236,13 @@ fn execute_delete(
         .get_mut(table)
         .ok_or_else(|| anyhow!("table '{table}' not found"))?;
 
+    let prepared_filter = prepare_filter(&entry.columns, filter)?;
+
     let mut kept = Vec::with_capacity(entry.rows.len());
     let mut removed = Vec::new();
 
     for row in entry.rows.iter() {
-        if filter_allows_row(entry, row, filter)? {
+        if filter_matches(&prepared_filter, row)? {
             removed.push(row.clone());
         } else {
             kept.push(row.clone());
@@ -272,31 +269,68 @@ fn execute_delete(
     })
 }
 
-fn filter_allows_row(
-    table: &TableData,
-    row: &[ScalarValue],
+#[derive(Debug, Clone)]
+enum PreparedFilter {
+    Comparison {
+        index: usize,
+        op: ComparisonOp,
+        value: ScalarValue,
+    },
+    And(Box<PreparedFilter>, Box<PreparedFilter>),
+    Or(Box<PreparedFilter>, Box<PreparedFilter>),
+}
+
+fn prepare_filter(
+    columns: &[String],
     filter: &Option<FilterExpr>,
-) -> Result<bool> {
+) -> Result<Option<PreparedFilter>> {
     match filter {
-        Some(expr) => evaluate_filter(expr, table, row),
+        Some(expr) => Ok(Some(prepare_filter_expr(columns, expr)?)),
+        None => Ok(None),
+    }
+}
+
+fn prepare_filter_expr(columns: &[String], expr: &FilterExpr) -> Result<PreparedFilter> {
+    match &expr.kind {
+        FilterKind::Comparison { column, op, value } => {
+            let index = find_column_index(columns, column)?;
+            Ok(PreparedFilter::Comparison {
+                index,
+                op: *op,
+                value: value.clone(),
+            })
+        }
+        FilterKind::And(lhs, rhs) => Ok(PreparedFilter::And(
+            Box::new(prepare_filter_expr(columns, lhs)?),
+            Box::new(prepare_filter_expr(columns, rhs)?),
+        )),
+        FilterKind::Or(lhs, rhs) => Ok(PreparedFilter::Or(
+            Box::new(prepare_filter_expr(columns, lhs)?),
+            Box::new(prepare_filter_expr(columns, rhs)?),
+        )),
+    }
+}
+
+fn filter_matches(filter: &Option<PreparedFilter>, row: &[ScalarValue]) -> Result<bool> {
+    match filter {
+        Some(expr) => evaluate_prepared_filter(expr, row),
         None => Ok(true),
     }
 }
 
-fn evaluate_filter(expr: &FilterExpr, table: &TableData, row: &[ScalarValue]) -> Result<bool> {
-    match &expr.kind {
-        FilterKind::Comparison { column, op, value } => {
-            let idx = table.column_index(column)?;
+fn evaluate_prepared_filter(filter: &PreparedFilter, row: &[ScalarValue]) -> Result<bool> {
+    match filter {
+        PreparedFilter::Comparison { index, op, value } => {
             let current = row
-                .get(idx)
+                .get(*index)
                 .ok_or_else(|| anyhow!("column index out of bounds"))?;
             compare_values(*op, current, value)
         }
-        FilterKind::And(lhs, rhs) => {
-            Ok(evaluate_filter(lhs, table, row)? && evaluate_filter(rhs, table, row)?)
+        PreparedFilter::And(lhs, rhs) => {
+            Ok(evaluate_prepared_filter(lhs, row)? && evaluate_prepared_filter(rhs, row)?)
         }
-        FilterKind::Or(lhs, rhs) => {
-            Ok(evaluate_filter(lhs, table, row)? || evaluate_filter(rhs, table, row)?)
+        PreparedFilter::Or(lhs, rhs) => {
+            Ok(evaluate_prepared_filter(lhs, row)? || evaluate_prepared_filter(rhs, row)?)
         }
     }
 }
@@ -337,6 +371,13 @@ fn compare_values(op: ComparisonOp, left: &ScalarValue, right: &ScalarValue) -> 
             "unsupported comparison between {left:?} and {right:?}"
         )),
     }
+}
+
+fn find_column_index(columns: &[String], column: &str) -> Result<usize> {
+    columns
+        .iter()
+        .position(|c| c == column)
+        .ok_or_else(|| anyhow!("column '{column}' not found"))
 }
 
 /// Scalar values used by the executor and planner.

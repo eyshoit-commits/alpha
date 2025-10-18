@@ -37,6 +37,7 @@ which = "5"
 rand = { version = "0.8", features = ["std", "std_rng"] }
 sha2 = "0.10"
 sqlparser = "0.37"
+jsonwebtoken = "9"
 
 [workspace.metadata]
 workspace-description = "BKG Phase-0 Rust workspace (cave kernel, db, daemon)"

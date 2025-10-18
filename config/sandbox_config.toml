@@ -1,0 +1,37 @@
+# sandbox_config.toml – Konfiguration der Microsandbox-Ausführungsumgebung
+
+[limits]  
+cpu_vcpus = 1                  # Standard CPU-Limit pro Sandbox (1 vCPU):contentReference[oaicite:21]{index=21}  
+memory_mib = 512               # Standard RAM-Limit (512 MiB)  
+timeout_sec = 60               # Standard Laufzeit-Timeout für Code (60 Sekunden)  
+disk_mib = 500                 # Standard Dateisystem-Speicherlimit (500 MiB)  
+allow_override = false         # Ressourcenlimits dürfen nur nach expliziter Genehmigung erhöht werden (Overrides via Orchestrator):contentReference[oaicite:22]{index=22}
+
+[runtime]  
+allowed_runtimes = ["python", "nodejs"]    # Erlaubte Sandbox-Sprachen/Umgebungen  
+default_mode = "quick"                    # Voreinstellung: Quick-Mode (kurzlebiger WASM/WASI-Container)  
+# Definition der Ausführungsmodi:  
+[runtime.quick]  
+engine = "WASM"               # Schnell startende WebAssembly-Umgebung für kurze Tasks  
+target_startup_ms = 200       # Ziel: <200ms Startup-Zeit (vgl. Microsandbox Quick Mode)  
+
+[runtime.persistent]  
+engine = "MicroVM"            # Persistente Micro-VM für längere Sessions  
+snapshot_support = true       # Unterstützung für Snapshots/Backtracking in Persistent Mode  
+
+[security]  
+enable_namespaces = true      # Linux-Namespaces zur Isolierung aktivieren (Prozess, Netzwerk, etc.)  
+enable_seccomp = true         # Seccomp Filter aktiv (Standard-Profil, verbietet unsichere Syscalls)  
+cgroups_v2 = true             # Ressourcenbegrenzung via cgroups v2 durchsetzen (für CPU/RAM)  
+sandbox_fs_overlay = true     # Schreibvorgänge nur auf überlagertem FS (kein direkter Host-FS-Zugriff)  
+allow_dev_mode = false        # Kein unsicherer Dev-Modus in produktiven Umgebungen (z.B. always false in Prod)  
+
+[logging]  
+audit_to_db = true            # Aktionen der Sandbox ins Audit-Log der DB schreiben (`audit_events` Tabelle):contentReference[oaicite:23]{index=23}  
+audit_to_file = true          # Zusätzlich lokales Audit-Log schreiben (z.B. `/var/log/bkg/sandbox_audit.jsonl`)  
+log_format = "jsonl"          # Format: JSON Lines, append-only (für manipulationssichere Audit-Trails)  
+scrub_pii = true              # Sensible Daten (PII, Secrets) aus Sandbox-Logs entfernen (siehe `BKG_SCRUB_LOGS`)  
+
+[telemetry]  
+enable_metrics = true         # Metriken über `/metrics` Endpoint verfügbar machen (Prometheus kompatibel):contentReference[oaicite:25]{index=25}  
+otel_integration = true       # OpenTelemetry-Spans für Sandbox-Aktionen publizieren (Rate via CAVE_OTEL_SAMPLING_RATE)  

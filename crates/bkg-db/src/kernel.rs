@@ -85,6 +85,11 @@ impl InMemoryStorageEngine {
     pub fn wal_entries(&self) -> usize {
         self.state.read().wal.len()
     }
+
+    /// Returns a clone of all WAL records (serialized events).
+    pub fn wal_records(&self) -> Vec<Vec<u8>> {
+        self.state.read().wal.clone()
+    }
 }
 
 impl StorageEngine for InMemoryStorageEngine {

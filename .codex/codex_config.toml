@@ -1,0 +1,47 @@
+# codex_config.toml – Konfiguration des LLM-Coding-Agenten
+
+[openai]  
+model = "gpt-4"                     # Primäres LLM-Modell (z.B. GPT-4 Codex Version)  
+temperature = 0.0                   # Deterministischer Output für konsistente Code-Ergebnisse  
+max_tokens_per_response = 1024      # Begrenzung der Antwortlänge des LLM
+
+[history]  
+persistence = "save_all"            # Konversationsverlauf persistent speichern (für Audit/Analyse):contentReference[oaicite:13]{index=13}  
+max_context_tokens = 8192          # Soft-Limit für genutzte Kontextgröße (z.B. GPT-4-Standard)  
+auto_compact = true                # Bei langen Verläufen automatische Zusammenfassung älterer Chats, um Kontextfenster nicht zu sprengen
+
+[prompt]  
+include_agents_md = true           # AGENTS.md-Regeln stets in den System-Prompt aufnehmen (Projekt-Kontext für den Agenten)  
+include_prompt_file = true         # `PROMPT.md` (aktuelle Arbeitsanweisungen) als Teil des Prompts laden  
+include_progress_file = true       # `Progress.md` (Status/To-Do-Tracker) als Kontext einbinden  
+# Diese Einstellungen verstärken den Prompt kontextuell, damit das LLM alle wichtigen Projektinfos kennt.
+
+[approvals]  
+# Aktionen, die eine explizite Bestätigung (Approval) erfordern, bevor sie ausgeführt werden:  
+require_confirmation_for = ["filesystem:delete", "git:force-push", "network:outgoing"]  
+# Niedrigrisiko-Aktionen, die automatisch ohne Nachfrage durchgeführt werden dürfen:  
+auto_approve_for = ["read-only-ops", "noninvasive-changes"]  
+approval_agent = "Admin-Orchestrator"   # Welche Instanz die Bestätigung einholt/erteilt (hier der orchestrierende Admin-Agent)
+
+[execution]  
+allow_local_shell = true             # Keine direkten Shell-Kommandos lokal ausführen (nutze stattdessen Sandbox)  
+allow_network_access = true       # Direkte Netzwerkzugriffe des Agents unterbinden (nur via Sandbox/Plugins erlaubt)  
+default_timeout_sec = 60           # Fallback-Timeout für Agenten-Aktionen (Sekunden)  
+# Diese Sicherheitsmaßnahmen zwingen den Agenten, die isolierte Sandbox zu nutzen und nichts außerhalb zu tun.
+
+[sandbox]  
+execution_mode = "remote"  
+mcp_url = "http://127.0.0.1:8080/mcp"    # Endpoint des CAVE-Kernels (MCP JSON-RPC) für Code-Ausführung in der Sandbox  
+auth_key_env = "BKG_API_KEY"            # Umgebungsvariable mit dem API-Schlüssel für Sandbox-Kommunikation  
+# Der Agent führt Code nur über den Sandbox-Service (MCP) aus, authentifiziert via API-Key – entspricht den Microsandbox-Richtlinien.
+
+[logging]  
+level = "INFO"                     # Log-Level für den Codex-Agenten  
+audit_log_file = "~/.bkg/agents_audit.log"   # Lokale Audit-Log-Datei (zusätzlich zu DB) für Agentenaktionen  
+audit_format = "jsonl"             # Format der Audit-Events (JSON Lines, append-only):contentReference[oaicite:14]{index=14}:contentReference[oaicite:15]{index=15}  
+sign_audit_events = true           # Audit-Events kryptographisch signieren (Integritätsschutz):contentReference[oaicite:16]{index=16}  
+
+[telemetry]  
+enable = true  
+sampling_rate = 1.0                # Vollständige Telemetrie im Dev-Modus; wird in Prod via `CAVE_OTEL_SAMPLING_RATE` gesenkt  
+endpoint = "otel-collector:4317"   # (Beispiel) OTLP-Endpoint für Telemetrie-Export  
