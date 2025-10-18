@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { TokenProvider } from "../components/token-context";
 import { TokenForm } from "../components/token-form";
+import { NAMESPACE_TOKEN_COOKIE } from "@shared/auth";
 
 export const metadata: Metadata = {
   title: "CAVE Namespace Portal",
@@ -10,10 +12,13 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const cookieStore = cookies();
+  const initialToken = cookieStore.get(NAMESPACE_TOKEN_COOKIE)?.value ?? "";
+
   return (
     <html lang="en">
       <body>
-        <TokenProvider>
+        <TokenProvider initialToken={initialToken}>
           <div className="min-h-screen bg-slate-50 text-slate-900">
             <header className="border-b border-slate-200 bg-white">
               <div className="mx-auto flex max-w-5xl flex-col gap-4 px-6 py-6">

@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiClient, DaemonApiError, IssuedKeyResponse, KeyInfo, KeyScope, sharedApiClient } from "@shared/api";
+import {
+  ApiClient,
+  DaemonApiError,
+  IssuedKeyResponse,
+  KeyInfo,
+  KeyScope,
+  RotatedKeyResponse,
+  sharedApiClient,
+} from "@shared/api";
 import { useToken } from "@/components/token-context";
 
 interface KeyFormState {
@@ -19,6 +27,11 @@ export default function KeysPage() {
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issued, setIssued] = useState<IssuedKeyResponse | null>(null);
+  const [rotationResult, setRotationResult] = useState<RotatedKeyResponse | null>(null);
+  const [rotationAck, setRotationAck] = useState<string | null>(null);
+  const [rotateKeyId, setRotateKeyId] = useState<string>("");
+  const [rotateRateLimit, setRotateRateLimit] = useState<number | "">("");
+  const [rotateTtlHours, setRotateTtlHours] = useState<number | "">("");
 
   const loadKeys = useCallback(async () => {
     if (!client) return;
@@ -53,6 +66,7 @@ export default function KeysPage() {
     setIssuing(true);
     setError(null);
     setIssued(null);
+    setRotationResult(null);
     try {
       const response = await client.issueKey({
         scope,
@@ -74,6 +88,46 @@ export default function KeysPage() {
     try {
       await client.revokeKey(id);
       await loadKeys();
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    }
+  };
+
+  const handleRotate = async () => {
+    if (!client) {
+      setError("Provide an admin token before rotating keys.");
+      return;
+    }
+    if (!rotateKeyId) {
+      setError("Select a key to rotate.");
+      return;
+    }
+
+    const payload: { key_id: string; rate_limit?: number; ttl_seconds?: number } = { key_id: rotateKeyId };
+    if (rotateRateLimit !== "" && rotateRateLimit > 0) {
+      payload.rate_limit = rotateRateLimit;
+    }
+    if (rotateTtlHours !== "" && rotateTtlHours > 0) {
+      payload.ttl_seconds = rotateTtlHours * 3600;
+    }
+
+    setError(null);
+    setRotationAck(null);
+    setRotationResult(null);
+    try {
+      const response = await client.rotateKey(payload);
+      setRotationResult(response);
+      await loadKeys();
+    } catch (err) {
+      setError(extractErrorMessage(err));
+    }
+  };
+
+  const handleAcknowledge = async () => {
+    if (!client || !rotationResult) return;
+    try {
+      await client.acknowledgeRotation(rotationResult.webhook.payload, rotationResult.webhook.signature);
+      setRotationAck("Rotation webhook acknowledged");
     } catch (err) {
       setError(extractErrorMessage(err));
     }
@@ -156,6 +210,100 @@ export default function KeysPage() {
             <p className="mt-1 text-emerald-700">Copy this token now; it will not be shown again.</p>
           </div>
         )}
+        {rotationResult && (
+          <div className="mt-4 space-y-3 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+            <header>
+              <p className="font-semibold">Rotation completed</p>
+              <p className="text-xs text-blue-800">Previous key {rotationResult.previous.key_prefix} superseded.</p>
+            </header>
+            <p className="break-all">
+              <span className="font-medium">New token:</span> {rotationResult.token}
+            </p>
+            <p className="text-xs text-blue-800">
+              Webhook event <code className="rounded bg-blue-100 px-1">{rotationResult.webhook.event_id}</code> pending
+              acknowledgement.
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleAcknowledge}
+                className="rounded-md border border-blue-200 bg-white px-3 py-2 text-xs font-semibold"
+              >
+                Acknowledge webhook
+              </button>
+              {rotationAck && <span className="self-center text-xs font-medium text-emerald-700">{rotationAck}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+        <h2 className="text-lg font-semibold">Rotate an existing key</h2>
+        <p className="mt-2 text-sm text-slate-600">
+          Rotations mint a replacement token while preserving audit history. Configure updated limits or TTL to enforce new
+          policies.
+        </p>
+        <div className="mt-4 grid gap-4 md:grid-cols-3">
+          <label className="flex flex-col text-sm md:col-span-3">
+            <span className="font-medium">Key to rotate</span>
+            <select
+              value={rotateKeyId}
+              onChange={(event) => setRotateKeyId(event.target.value)}
+              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
+            >
+              <option value="">Select key…</option>
+              {keys.map((key) => (
+                <option key={key.id} value={key.id}>
+                  {key.key_prefix} · {renderScope(key.scope)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col text-sm">
+            <span className="font-medium">New rate limit (req/min)</span>
+            <input
+              type="number"
+              value={rotateRateLimit === "" ? "" : rotateRateLimit}
+              onChange={(event) =>
+                setRotateRateLimit(event.target.value === "" ? "" : Number(event.target.value))
+              }
+              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
+              placeholder="Keep existing"
+            />
+          </label>
+          <label className="flex flex-col text-sm">
+            <span className="font-medium">New TTL (hours)</span>
+            <input
+              type="number"
+              value={rotateTtlHours === "" ? "" : rotateTtlHours}
+              onChange={(event) =>
+                setRotateTtlHours(event.target.value === "" ? "" : Number(event.target.value))
+              }
+              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
+              placeholder="Keep existing"
+            />
+          </label>
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={handleRotate}
+            className="rounded-md border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm"
+          >
+            Rotate key
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRotateKeyId("");
+              setRotateRateLimit("");
+              setRotateTtlHours("");
+            }}
+            className="rounded-md border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm"
+          >
+            Clear form
+          </button>
+        </div>
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">

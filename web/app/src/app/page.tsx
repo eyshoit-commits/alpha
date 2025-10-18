@@ -132,7 +132,7 @@ export default function NamespaceDashboard() {
       <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-xl font-semibold">Sandbox lifecycle</h2>
         <p className="mt-2 text-sm text-slate-600">
-          Create and manage sandboxes within your namespace. All operations call the daemon's lifecycle API directly with the
+          Create and manage sandboxes within your namespace. All operations call the daemon&rsquo;s lifecycle API directly with the
           bearer token provided above.
         </p>
         <div className="mt-4 grid gap-4 md:grid-cols-2">

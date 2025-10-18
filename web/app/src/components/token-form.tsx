@@ -1,11 +1,20 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { useToken } from "./token-context";
 
-export function TokenForm() {
+interface TokenFormProps {
+  label?: string;
+  showClear?: boolean;
+  onSaved?: (token: string) => void;
+}
+
+export function TokenForm({ label = "Namespace token", showClear = true, onSaved }: TokenFormProps) {
   const { token, setToken } = useToken();
   const [value, setValue] = useState(token);
+  const params = useSearchParams();
+  const router = useRouter();
 
   useEffect(() => {
     setValue(token);
@@ -13,13 +22,19 @@ export function TokenForm() {
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
-    setToken(value.trim());
+    const next = value.trim();
+    setToken(next);
+    onSaved?.(next);
+    const returnTo = params?.get("returnTo");
+    if (returnTo && next) {
+      router.replace(returnTo);
+    }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-wrap gap-3 items-end text-sm">
+    <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-3 text-sm">
       <label className="flex flex-col">
-        <span className="font-medium">Namespace token</span>
+        <span className="font-medium">{label}</span>
         <input
           type="password"
           value={value}
@@ -35,16 +50,18 @@ export function TokenForm() {
         >
           Save token
         </button>
-        <button
-          type="button"
-          className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm"
-          onClick={() => {
-            setValue("");
-            setToken("");
-          }}
-        >
-          Clear
-        </button>
+        {showClear ? (
+          <button
+            type="button"
+            className="rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm"
+            onClick={() => {
+              setValue("");
+              setToken("");
+            }}
+          >
+            Clear
+          </button>
+        ) : null}
       </div>
     </form>
   );
