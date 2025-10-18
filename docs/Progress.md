@@ -7,9 +7,14 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 - Phase-0 Komponenten sind teilweise implementiert: Das Prozess-Shim spannt jetzt Overlay-Workspaces und eine konfigurierbare Seccomp-BPF-Filterung auf, inklusive Linux-Tests für geblockte Sockets sowie nicht-persistente Schreibversuche (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Namespace-Hardening via Bubblewrap bleibt offen.
 - Persistenz läuft aktuell über eine SQLite-Anbindung mit `bkg_db::Database`, die API-Schlüssel, Rotationen und Nutzungs-Timestamps dauerhaft speichert (`crates/cave-daemon/src/auth.rs:66-160`, `crates/bkg-db/src/lib.rs:45-228`). Die in der Architektur geforderte Postgres/RLS-Konfiguration ist weiterhin offen (`docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
-- Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
+- Architektur-, ENV- und Feature-Origin-Dokumente sind mit dem aktuellen Stand der Crates synchronisiert und enthalten neue Compliance-Abschnitte (`docs/architecture.md`, `docs/env.md`, `docs/FEATURE_ORIGINS.md`).
 - Build-/CI-Setup ist aktiv: `Makefile` liefert `make api-schema` für OpenAPI-Generierung (`Makefile:1-6`), und `.github/workflows/ci.yml` führt Formatierung, Linting, Tests, Schema-Checks sowie Supply-Chain-Schritte aus (`.github/workflows/ci.yml:1-164`). Playwright-E2E-Tests laufen in der `web-ui`-Jobkette über `npm run test:e2e` (`.github/workflows/ci.yml:97-123`). Offene Punkte: Security-Tests sind noch als Platzhalter hinterlegt, SLSA/Signierungsschritte bleiben teilweise TODO (`.github/workflows/ci.yml:124-187`).
-- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
+- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin im operativen Betrieb; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
+
+### 2025-10-19 – Dokumentationsabgleich & Compliance-Tracking
+- Status: Feature-Origin-Einträge 5–7 ergänzt, Architektur-/ENV-Dokumente mit aktuellen Runtimes, Audit- und Rotation-Mechanismen synchronisiert.
+- Tests: Keine automatisierten Tests ausgeführt (Docs-only Update).
+- Offene Fragen: Reviewer-Signoff & Commit-Referenzen für neue Feature-Origin-Einträge nach Merge ergänzen; prüfen, ob weitere ENV-Variablen aus `web/*` dokumentiert werden müssen.
 
 ## Phase-0 Verpflichtungen
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
@@ -30,10 +35,10 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 - [x] `AGENTS.md` angelegt (zentrales Agenten-Playbook); Cross-Linking im Repo aktuell (`AGENTS.md:1`, `docs/architecture.md:11`, `PROMPT.md:63`).
 - [x] `docs/bkg-db.md` aktualisiert; enthält nun den vollständigen Supabase/BKG-DB Prompt & Roadmap (ersetzt `docs/PROMPT_BKG_DB.md`).
 - [x] `docs/roadmap.md` hinzugefügt (Phase-0 Roadmap & Priorisierung); bei Status-Updates als Referenz nutzen.
-- [ ] `docs/FEATURE_ORIGINS.md` von Draft auf vollständige Einträge mit Commit/PR-Referenzen & Reviewer-Signoff erweitern.  
-  Status: Nur Draft-Einträge ohne Commits/Signoff (`docs/FEATURE_ORIGINS.md:18`).
-- [ ] `docs/architecture.md`, `docs/env.md`, vorhandene Dokumente auf Konsistenz mit v1.8.2 prüfen.  
-  Status: Dokumente existieren, Review ausstehend (`docs/architecture.md:1`, `docs/env.md:1`).
+- [ ] `docs/FEATURE_ORIGINS.md` von Draft auf vollständige Einträge mit Commit/PR-Referenzen & Reviewer-Signoff erweitern.
+  Status: Neue Einträge (Audit-Logs, Rotation-Webhooks, OpenAPI) ergänzt; Commit-IDs & Reviewer-Signoff stehen weiterhin aus (`docs/FEATURE_ORIGINS.md`).
+- [ ] `docs/architecture.md`, `docs/env.md`, vorhandene Dokumente auf Konsistenz mit v1.8.2 prüfen.
+  Status: Inhalte synchronisiert inkl. Compliance-Abschnitten; Monitoring auf weitere Codeänderungen erforderlich (`docs/architecture.md`, `docs/env.md`).
 
 ## CI, Tests & Artefakte
 - [x] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.
