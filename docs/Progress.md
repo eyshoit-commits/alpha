@@ -1,13 +1,14 @@
 # Progress Tracker
 
-Zuletzt synchronisiert mit `README.md` v1.8.2.
+Zuletzt synchronisiert mit `README.md` v1.8.2 und `PROMPT.md` (Commit-Stand 2025-10-18).
+Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMPT §"Standard Workflow" wurden gegen diese Notizen abgeglichen.
 
-## Aktueller Status (Stand 2025-10-18)
+## Aktueller Status (Stand 2025-10-19)
 - Phase-0 Komponenten sind teilweise implementiert: Das Prozess-Shim spannt jetzt Overlay-Workspaces und eine konfigurierbare Seccomp-BPF-Filterung auf, inklusive Linux-Tests für geblockte Sockets sowie nicht-persistente Schreibversuche (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Namespace-Hardening via Bubblewrap bleibt offen.
-- Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
+- Persistenz läuft aktuell über eine SQLite-Anbindung mit `bkg_db::Database`, die API-Schlüssel, Rotationen und Nutzungs-Timestamps dauerhaft speichert (`crates/cave-daemon/src/auth.rs:66-160`, `crates/bkg-db/src/lib.rs:45-228`). Die in der Architektur geforderte Postgres/RLS-Konfiguration ist weiterhin offen (`docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
-- Build-/CI-Setup (Makefile + GitHub Actions Workflow) steht und führt Formatierung, Tests, OpenAPI-Generierung, Playwright und erste SBOM/SLSA-Schritte aus (`Makefile:1`, `.github/workflows/ci.yml:1`).
+- Build-/CI-Setup ist aktiv: `Makefile` liefert `make api-schema` für OpenAPI-Generierung (`Makefile:1-6`), und `.github/workflows/ci.yml` führt Formatierung, Linting, Tests, Schema-Checks sowie Supply-Chain-Schritte aus (`.github/workflows/ci.yml:1-164`). Playwright-E2E-Tests laufen in der `web-ui`-Jobkette über `npm run test:e2e` (`.github/workflows/ci.yml:97-123`). Offene Punkte: Security-Tests sind noch als Platzhalter hinterlegt, SLSA/Signierungsschritte bleiben teilweise TODO (`.github/workflows/ci.yml:124-187`).
 - Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
@@ -35,8 +36,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Dokumente existieren, Review ausstehend (`docs/architecture.md:1`, `docs/env.md:1`).
 
 ## CI, Tests & Artefakte
-- [ ] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.  
-  Status: Workflow (`.github/workflows/ci.yml`) erstellt, `make api-schema` Schritt fehlt weiterhin.
+- [x] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.
+  Status: `schema-and-security` Job ruft `make api-schema`, prüft via `git diff` und validiert das Ergebnis mit `openapi-cli validate` (`.github/workflows/ci.yml:56-91`).
 - [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).
   Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
 - [x] UI-E2E-Tests (Playwright) in CI einbinden.
@@ -50,9 +51,9 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## Governance & Betrieb
 - [x] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).
-  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/server.rs:760-848`, `crates/cave-daemon/src/auth.rs:59-332`, `crates/bkg-db/src/lib.rs:90-220`).
+  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/main.rs:147-210`, `crates/cave-daemon/src/auth.rs:57-310`, `crates/bkg-db/src/lib.rs:90-220`).
 - [x] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.
-  Status: AuthService liest/schreibt Keys über `bkg_db` und unterstützt Rotation samt Webhook-Signaturen (`crates/cave-daemon/src/auth.rs:59-332`, `crates/cave-daemon/src/server.rs:600-741`).
+  Status: `AuthService` nutzt `bkg_db::Database` für Ausgabe, Rotation und Nutzungstracking (Hashing, Revocation, Touch) über SQLite (`crates/cave-daemon/src/auth.rs:66-210`, `crates/bkg-db/src/lib.rs:45-228`). Follow-up: Postgres-Migration & Verschlüsselungsstrategie definieren (`docs/architecture.md:16`).
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
 - [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
