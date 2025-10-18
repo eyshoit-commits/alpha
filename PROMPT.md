@@ -62,7 +62,7 @@
 
 ## Dokumentation & Templates
 - Pflichtdokumente: `docs/architecture.md`, `docs/api.md`, `docs/cli.md`, `docs/deployment.md`, `docs/operations.md`, `docs/testing.md`, `docs/security.md`, `docs/governance.md`, `docs/compatibility.md`, `docs/FEATURE_ORIGINS.md`, `docs/env.md`, `schema/cave.schema.json`.
-- Agenten-Playbook: siehe `docs/Agents.md` für Rollen, Sandbox-Abläufe und Orchestrierungsregeln.
+- Agenten-Playbook: siehe `AGENTS.md` (komplette Regeln) und `docs/Agents.md` (historische Ergänzungen).
 - `docs/FEATURE_ORIGINS.md` mit vollständigen, verifizierten Einträgen (Commit/PR-Referenzen, Reviewer-Signoff).
 - `cave.yaml` validieren gegen `schema/cave.schema.json`.
 

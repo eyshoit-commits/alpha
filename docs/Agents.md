@@ -7,6 +7,7 @@ Maintainer: @bkgoder
 Zweck
 -----
 Dieses Dokument beschreibt, wie LLM-basierte Agents innerhalb der BKG Microsandbox agieren. Es ergänzt den verbindlichen System-Prompt (`README.md` v1.8.2) und dient dazu, Workflows für Coding-, Review- und Orchestrierungs-Agents konsistent und sicher abzubilden.
+Für die ausführliche, laufend gepflegte Regelbasis siehe zusätzlich `AGENTS.md` im Repository-Wurzelverzeichnis.
 
 Agentenübersicht
 ----------------

@@ -1,13 +1,13 @@
 # codex_config.toml – Konfiguration des LLM-Coding-Agenten
 
 [openai]  
-model = "gpt-4"                     # Primäres LLM-Modell (z.B. GPT-4 Codex Version)  
+model = "gpt-4-1106-preview"        # Größeres Kontextfenster (128k) für umfangreiche Agentenrichtlinien  
 temperature = 0.0                   # Deterministischer Output für konsistente Code-Ergebnisse  
 max_tokens_per_response = 1024      # Begrenzung der Antwortlänge des LLM
 
 [history]  
 persistence = "save_all"            # Konversationsverlauf persistent speichern (für Audit/Analyse):contentReference[oaicite:13]{index=13}  
-max_context_tokens = 8192          # Soft-Limit für genutzte Kontextgröße (z.B. GPT-4-Standard)  
+max_context_tokens = 24576         # Erweitertes Limit passend zum größeren Modellkontext  
 auto_compact = true                # Bei langen Verläufen automatische Zusammenfassung älterer Chats, um Kontextfenster nicht zu sprengen
 
 [prompt]  
