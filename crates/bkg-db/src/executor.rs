@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::kernel::{InMemoryStorageEngine, StorageEngine, StorageTransaction, TransactionMode};
-use crate::planner::LogicalPlan;
+use crate::planner::{FilterExpr, LogicalPlan};
 
 // TODO(bkg-db/executor): Streaming Iterator API, echte MVCC-Leseansichten,
 // Projection/Filter Operatoren implementieren.
@@ -38,6 +38,7 @@ impl ExecutionContext {
 
 #[derive(Debug, Default, Clone)]
 struct TableData {
+    columns: Vec<String>,
     rows: Vec<Vec<ScalarValue>>,
 }
 
@@ -65,8 +66,12 @@ impl DefaultQueryExecutor {
 impl QueryExecutor for DefaultQueryExecutor {
     fn execute(&self, ctx: &ExecutionContext, plan: &LogicalPlan) -> Result<ExecutionResult> {
         match plan {
-            LogicalPlan::Insert { table, values } => execute_insert(ctx, table, values),
-            LogicalPlan::SelectAll { table } => execute_select(ctx, table),
+            LogicalPlan::Insert {
+                table,
+                columns,
+                values,
+            } => execute_insert(ctx, table, columns, values),
+            LogicalPlan::Select { table, filter } => execute_select(ctx, table, filter),
         }
     }
 }
@@ -74,6 +79,7 @@ impl QueryExecutor for DefaultQueryExecutor {
 fn execute_insert(
     ctx: &ExecutionContext,
     table: &str,
+    columns: &[String],
     values: &[Vec<ScalarValue>],
 ) -> Result<ExecutionResult> {
     if values.is_empty() {
@@ -87,10 +93,29 @@ fn execute_insert(
         let entry = tables
             .entry(table.to_string())
             .or_insert_with(TableData::default);
+
+        if entry.columns.is_empty() {
+            if !columns.is_empty() {
+                entry.columns = columns.to_vec();
+            } else {
+                entry.columns = (0..values[0].len())
+                    .map(|idx| format!("col{idx}"))
+                    .collect();
+            }
+        } else if !columns.is_empty() && entry.columns != columns {
+            return Err(anyhow!(
+                "column list does not match existing schema for table {table}"
+            ));
+        }
+
         for row in values {
+            if row.len() != entry.columns.len() {
+                return Err(anyhow!("row length does not match table schema"));
+            }
             entry.rows.push(row.clone());
             let payload = serde_json::to_vec(&json!({
                 "table": table,
+                "columns": entry.columns.clone(),
                 "values": row,
             }))?;
             tx.append_log(&payload);
@@ -105,16 +130,44 @@ fn execute_insert(
     })
 }
 
-fn execute_select(ctx: &ExecutionContext, table: &str) -> Result<ExecutionResult> {
+fn execute_select(
+    ctx: &ExecutionContext,
+    table: &str,
+    filter: &Option<FilterExpr>,
+) -> Result<ExecutionResult> {
     let tables = ctx.tables.read();
-    let rows = tables
+    let entry = tables
         .get(table)
-        .map(|t| t.rows.clone())
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow!("table '{table}' not found"))?;
+
+    let mut rows = Vec::new();
+    for row in &entry.rows {
+        if matches_filter(entry, row, filter)? {
+            rows.push(row.clone());
+        }
+    }
+
     Ok(ExecutionResult {
         rows_affected: rows.len() as u64,
         rows,
     })
+}
+
+fn matches_filter(
+    table: &TableData,
+    row: &[ScalarValue],
+    filter: &Option<FilterExpr>,
+) -> Result<bool> {
+    if let Some(filter) = filter {
+        let idx = table
+            .columns
+            .iter()
+            .position(|c| c == &filter.column)
+            .ok_or_else(|| anyhow!("column '{}' not found", filter.column))?;
+        Ok(row[idx] == filter.value)
+    } else {
+        Ok(true)
+    }
 }
 
 /// Scalar values used by the executor and planner.
@@ -155,7 +208,7 @@ mod tests {
         let executor = DefaultQueryExecutor::new();
 
         let insert_ast = parser
-            .parse("INSERT INTO projects VALUES (1, 'alpha')")
+            .parse("INSERT INTO projects (id, name) VALUES (1, 'alpha')")
             .expect("parse insert");
         let plan = planner
             .optimize(planner.build_logical_plan(&insert_ast).unwrap())
@@ -165,7 +218,7 @@ mod tests {
         assert_eq!(ctx.wal_entries(), 1);
 
         let select_ast = parser
-            .parse("SELECT * FROM projects")
+            .parse("SELECT * FROM projects WHERE name = 'alpha'")
             .expect("parse select");
         let select_plan = planner
             .optimize(planner.build_logical_plan(&select_ast).unwrap())
@@ -177,9 +230,17 @@ mod tests {
         assert_eq!(rows.rows[0][0], ScalarValue::Int64(1));
         assert_eq!(rows.rows[0][1], ScalarValue::String("alpha".into()));
 
+        let neg_select = parser
+            .parse("SELECT * FROM projects WHERE name = 'beta'")
+            .expect("parse select");
+        let neg_plan = planner
+            .optimize(planner.build_logical_plan(&neg_select).unwrap())
+            .unwrap();
+        let neg_rows = executor.execute(&ctx, &neg_plan).expect("execute select");
+        assert!(neg_rows.rows.is_empty());
+
         drop(ctx);
 
-        // Reload storage and ensure WAL persists.
         let storage_reload = InMemoryStorageEngine::with_file_wal(&wal_path).expect("storage");
         storage_reload.recover().expect("recover");
         assert_eq!(storage_reload.wal_entries(), 1);

@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use anyhow::{anyhow, Result};
-use sqlparser::ast::{ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor};
+use sqlparser::ast::{
+    BinaryOperator, Expr, ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor,
+};
 
 use crate::executor::ScalarValue;
 use crate::sql::SqlAst;
@@ -16,11 +18,19 @@ use crate::sql::SqlAst;
 pub enum LogicalPlan {
     Insert {
         table: String,
+        columns: Vec<String>,
         values: Vec<Vec<ScalarValue>>,
     },
-    SelectAll {
+    Select {
         table: String,
+        filter: Option<FilterExpr>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct FilterExpr {
+    pub column: String,
+    pub value: ScalarValue,
 }
 
 /// Planner contract to create logical plans from SQL ASTs.
@@ -47,8 +57,11 @@ impl LogicalPlanner for PlannerDraft {
     fn build_logical_plan(&self, ast: &SqlAst) -> Result<LogicalPlan> {
         match &ast.statement {
             Statement::Insert {
-                table_name, source, ..
-            } => build_insert_plan(table_name, source),
+                table_name,
+                columns,
+                source,
+                ..
+            } => build_insert_plan(table_name, columns, source),
             Statement::Query(query) => build_select_plan(query),
             other => Err(anyhow!("statement not supported yet: {other:?}")),
         }
@@ -62,7 +75,11 @@ impl LogicalOptimizer for PlannerDraft {
     }
 }
 
-fn build_insert_plan(table_name: &ObjectName, source: &Query) -> Result<LogicalPlan> {
+fn build_insert_plan(
+    table_name: &ObjectName,
+    columns: &Vec<sqlparser::ast::Ident>,
+    source: &Query,
+) -> Result<LogicalPlan> {
     let table = table_name.to_string();
     let query_body = source.body.as_ref();
     let values = match query_body {
@@ -79,8 +96,15 @@ fn build_insert_plan(table_name: &ObjectName, source: &Query) -> Result<LogicalP
         rows.push(row_values);
     }
 
+    let columns = if columns.is_empty() {
+        Vec::new()
+    } else {
+        columns.iter().map(|c| c.value.clone()).collect()
+    };
+
     Ok(LogicalPlan::Insert {
         table,
+        columns,
         values: rows,
     })
 }
@@ -105,11 +129,17 @@ fn build_select_plan(query: &Query) -> Result<LogicalPlan> {
         _ => return Err(anyhow!("unsupported table factor")),
     };
 
-    Ok(LogicalPlan::SelectAll { table })
+    let filter = if let Some(selection) = &select.selection {
+        parse_filter(selection)?
+    } else {
+        None
+    };
+
+    Ok(LogicalPlan::Select { table, filter })
 }
 
-fn value_to_scalar(value: &sqlparser::ast::Expr) -> Result<ScalarValue> {
-    use sqlparser::ast::{Expr, Value};
+fn value_to_scalar(value: &Expr) -> Result<ScalarValue> {
+    use sqlparser::ast::Value;
 
     match value {
         Expr::Value(Value::Number(num, _)) => {
@@ -125,5 +155,21 @@ fn value_to_scalar(value: &sqlparser::ast::Expr) -> Result<ScalarValue> {
         Expr::Value(Value::Boolean(b)) => Ok(ScalarValue::Bool(*b)),
         Expr::Value(Value::Null) => Ok(ScalarValue::Null),
         other => Err(anyhow!("unsupported literal expression: {other:?}")),
+    }
+}
+
+fn parse_filter(expr: &Expr) -> Result<Option<FilterExpr>> {
+    match expr {
+        Expr::BinaryOp { left, op, right } if matches!(op, BinaryOperator::Eq) => {
+            match (&**left, &**right) {
+                (Expr::Identifier(ident), value) => Ok(Some(FilterExpr {
+                    column: ident.value.clone(),
+                    value: value_to_scalar(value)?,
+                })),
+                _ => Err(anyhow!("unsupported WHERE clause")),
+            }
+        }
+        Expr::BinaryOp { .. } => Err(anyhow!("only equality filters are supported")),
+        _ => Err(anyhow!("unsupported WHERE clause")),
     }
 }
