@@ -67,7 +67,7 @@ Dieses Dokument beschreibt Governance-, Secrets- und Betriebsrichtlinien für di
 ---
 
 ## 5. Build- & Lieferketten-Automatisierung
-- **OpenAPI-Schema**: `make api-schema` erzeugt `openapi.yaml` per `cargo run --bin export-openapi`; CI ruft das Target auf und prüft mittels `openapi-cli validate`, dass der Commit-Stand eingecheckt bleibt (`.github/workflows/ci.yml`). Die Quelle dafür sind die `utoipa`-Annotationen an den Axum-Handlern (`crates/cave-daemon/src/server.rs`).
+- **OpenAPI-Schema**: `make api-schema` erzeugt `openapi.yaml` via `scripts/generate_openapi.py`; CI ruft das Target auf und prüft mittels `openapi-cli validate`, dass der Commit-Stand eingecheckt bleibt (`.github/workflows/ci.yml`).
 - **Schema-Drift**: Jeder CI-Lauf führt `git diff --exit-code -- openapi.yaml` aus; Abweichungen brechen den Build und verweisen auf nachzuholende Commits.
 - **SBOM**: `supply-chain`-Job nutzt Syft (`sbom.json`). Ergebnis bleibt Artefakt; Signatur erfolgt nur, wenn `COSIGN_KEY_B64` Secret gesetzt oder `cosign.key` eingecheckt ist.
 - **Cosign**: Signing-Step überspringt sich ohne Secret, vermeidet Fehlalarme. Bereitgestellte Schlüssel werden aus dem Secret Base64-dekodiert und nicht im Repo persistiert.

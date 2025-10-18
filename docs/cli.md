@@ -78,7 +78,7 @@ sandbox 'runner' already exists in namespace 'demo'
 ---
 
 ## Automatisierung
-- Schema-Aktualisierung: `make api-schema` (ruft `cargo run --bin export-openapi` und damit die `utoipa`-Annotationen des Daemons auf).
+- Schema-Aktualisierung: `make api-schema` (nutzt `scripts/generate_openapi.py`).
 - Validation in CI: `openapi-cli validate openapi.yaml` (siehe `.github/workflows/ci.yml`).
 - CLI-E2E-Tests (Backlog): `cargo test -p cave-daemon` + künftige Integrationstests (`assert_cmd`).
 

@@ -27,6 +27,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
+    migrate::MigrateError,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
     Row, SqlitePool,
 };
@@ -62,7 +63,17 @@ impl Database {
             .await?;
 
         // Run embedded migrations. The directory is resolved relative to this crate.
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if let Err(err) = sqlx::migrate!("./migrations").run(&pool).await {
+            match &err {
+                MigrateError::Execute(sqlx::Error::Database(db_err))
+                    if db_err.message().contains("_sqlx_migrations")
+                        && db_err
+                            .code()
+                            .map(|code| code == "2067" || code == "1555")
+                            .unwrap_or(false) => {}
+                _ => return Err(err.into()),
+            }
+        }
 
         Ok(Self { pool })
     }
@@ -90,6 +101,7 @@ impl Database {
     }
 
     /// Persists a hashed API key and returns the stored record metadata.
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_api_key(
         &self,
         token_hash: &str,
@@ -97,6 +109,8 @@ impl Database {
         scope: ApiKeyScope,
         rate_limit: u32,
         expires_at: Option<DateTime<Utc>>,
+        rotated_from: Option<Uuid>,
+        rotated_at: Option<DateTime<Utc>>,
     ) -> Result<ApiKeyRecord> {
         let now = Utc::now();
         let id = Uuid::new_v4();
@@ -105,8 +119,8 @@ impl Database {
             r#"
             INSERT INTO api_keys (
                 id, token_hash, token_prefix, scope_type, scope_namespace,
-                rate_limit, created_at, expires_at, revoked
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             "#,
         )
         .bind(id.to_string())
@@ -117,6 +131,8 @@ impl Database {
         .bind(rate_limit as i64)
         .bind(now.to_rfc3339())
         .bind(expires_at.map(|v| v.to_rfc3339()))
+        .bind(rotated_from.map(|value| value.to_string()))
+        .bind(rotated_at.map(|ts| ts.to_rfc3339()))
         .execute(&self.pool)
         .await?;
 
@@ -164,6 +180,60 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Persists a queued key-rotation webhook event for later delivery.
+    pub async fn insert_key_rotation_event(
+        &self,
+        new_key_id: Uuid,
+        previous_key_id: Uuid,
+        rotated_at: DateTime<Utc>,
+        payload: &str,
+        signature: &str,
+    ) -> Result<WebhookEventRecord> {
+        let id = Uuid::new_v4();
+        let created_at = Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO key_rotation_events (
+                id, new_key_id, previous_key_id, rotated_at,
+                payload, signature, created_at, delivered
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(new_key_id.to_string())
+        .bind(previous_key_id.to_string())
+        .bind(rotated_at.to_rfc3339())
+        .bind(payload)
+        .bind(signature)
+        .bind(created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        let payload_value = serde_json::from_str(payload)?;
+        Ok(WebhookEventRecord {
+            id,
+            new_key_id,
+            previous_key_id,
+            rotated_at,
+            payload: payload_value,
+            signature: signature.to_string(),
+            created_at,
+            delivered: false,
+        })
+    }
+
+    /// Lists queued key-rotation webhook events.
+    pub async fn list_key_rotation_events(&self) -> Result<Vec<WebhookEventRecord>> {
+        let mut rows = sqlx::query("SELECT * FROM key_rotation_events ORDER BY created_at DESC")
+            .fetch(&self.pool);
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_rotation_event(row)?);
+        }
+        Ok(out)
     }
 
     /// Creates or updates an RLS policy identified by (table_name, policy_name).
@@ -558,6 +628,33 @@ fn map_api_key(row: SqliteRow) -> Result<ApiKeyRecord> {
             .map(parse_datetime)
             .transpose()?,
         revoked: row.try_get::<i64, _>("revoked")? != 0,
+        rotated_from: row
+            .try_get::<Option<String>, _>("rotated_from")?
+            .map(|value| Uuid::parse_str(&value))
+            .transpose()?,
+        rotated_at: row
+            .try_get::<Option<String>, _>("rotated_at")?
+            .map(parse_datetime)
+            .transpose()?,
+    })
+}
+
+fn map_rotation_event(row: SqliteRow) -> Result<WebhookEventRecord> {
+    let id: String = row.try_get("id")?;
+    let new_key_id: String = row.try_get("new_key_id")?;
+    let previous_key_id: String = row.try_get("previous_key_id")?;
+    let payload_json: String = row.try_get("payload")?;
+
+    Ok(WebhookEventRecord {
+        id: Uuid::parse_str(&id)?,
+        new_key_id: Uuid::parse_str(&new_key_id)?,
+        previous_key_id: Uuid::parse_str(&previous_key_id)?,
+        rotated_at: parse_datetime(row.try_get("rotated_at")?)?,
+        payload: serde_json::from_str(&payload_json)
+            .context("failed to deserialize rotation webhook payload")?,
+        signature: row.try_get("signature")?,
+        created_at: parse_datetime(row.try_get("created_at")?)?,
+        delivered: row.try_get::<i64, _>("delivered")? != 0,
     })
 }
 
@@ -680,6 +777,19 @@ pub struct ExecutionRecord {
     pub timed_out: bool,
 }
 
+/// Queued webhook event awaiting delivery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookEventRecord {
+    pub id: Uuid,
+    pub new_key_id: Uuid,
+    pub previous_key_id: Uuid,
+    pub rotated_at: DateTime<Utc>,
+    pub payload: Value,
+    pub signature: String,
+    pub created_at: DateTime<Utc>,
+    pub delivered: bool,
+}
+
 /// Persistent representation of API key scope (admin or namespace bounded).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -718,6 +828,8 @@ pub struct ApiKeyRecord {
     pub last_used_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked: bool,
+    pub rotated_from: Option<Uuid>,
+    pub rotated_at: Option<DateTime<Utc>>,
 }
 
 /// Input payload when creating oder updating RLS policies.
@@ -924,7 +1036,15 @@ mod tests {
         };
 
         let record = db
-            .insert_api_key("hash-123", "hash-prefix", scope.clone(), 100, None)
+            .insert_api_key(
+                "hash-123",
+                "hash-prefix",
+                scope.clone(),
+                100,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 

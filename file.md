@@ -6,7 +6,6 @@
 ├── Cargo.lock
 ├── Cargo.toml
 ├── PROMPT.md
-├── Progress.md
 ├── README.md
 ├── config/
 │   └── sandbox_config.toml
@@ -22,29 +21,45 @@
 │       ├── Cargo.toml
 │       └── src/{isolation.rs,lib.rs}
 ├── docs/
-│   ├── architecture.md
-│   ├── env.md
-│   ├── FEATURE_ORIGINS.md
 │   ├── Progress.md
-│   ├── roadmap.md
+│   ├── architecture.md
 │   ├── api.md
 │   ├── cli.md
+│   ├── compatibility.md
 │   ├── deployment.md
+│   ├── env.md
+│   ├── FEATURE_ORIGINS.md
 │   ├── governance.md
 │   ├── operations.md
+│   ├── roadmap.md
 │   ├── security.md
-│   ├── testing.md
-│   └── compatibility.md
+│   └── testing.md
 ├── schema/
 │   └── cave.schema.json
 ├── web/
-│   └── admin/
-│       ├── README.md
-│       └── package.json
-├── .codex/
-│   └── codex_config.toml
-└── .github/workflows/
-    └── ci.yml
+│   ├── package.json (workspaces: admin, app)
+│   ├── lib/api.ts
+│   ├── playwright.config.ts
+│   ├── admin/
+│   │   ├── package.json
+│   │   ├── next.config.mjs
+│   │   ├── tsconfig.json
+│   │   ├── src/app/(dashboard)/{sandboxes,keys,telemetry}/page.tsx
+│   │   ├── src/components/{token-context.tsx,token-form.tsx}
+│   │   └── src/app/{layout.tsx,page.tsx,globals.css}
+│   ├── app/
+│   │   ├── package.json
+│   │   ├── next.config.mjs
+│   │   ├── tsconfig.json
+│   │   ├── src/app/(dashboard)/history/page.tsx
+│   │   ├── src/components/{token-context.tsx,token-form.tsx}
+│   │   └── src/app/{layout.tsx,page.tsx,globals.css}
+│   └── tests/e2e/
+│       ├── admin-sandboxes.spec.ts
+│       └── namespace-dashboard.spec.ts
+├── .github/workflows/
+│   └── ci.yml
+└── file.md
 ```
 
 > Vollständige Listings können bei Bedarf mit `find . -print | sort` erzeugt werden (Achtung: erzeugt sehr lange Ausgaben).

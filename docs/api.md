@@ -9,7 +9,7 @@ Maintainer: @bkgoder
 ## Zweck
 Dieser Leitfaden dokumentiert die HTTP-Schnittstellen des `cave-daemon` (Sandbox-Lifecycle und API-Key-Verwaltung). Er ergänzt `README.md`, `docs/cli.md`, `docs/operations.md` und verweist auf die generierte OpenAPI-Spezifikation `../openapi.yaml`.
 
-Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`cargo run --bin export-openapi`) und in CI via `openapi-cli validate` geprüft. Die OpenAPI-Daten leiten sich direkt aus den mit `utoipa` annotierten Handlern unter `crates/cave-daemon/src/server.rs` ab; jede API-Änderung muss daher über Rust-Code erfolgen und anschließend das Schema neu generieren.
+Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/main.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
 
 ---
 
@@ -18,7 +18,7 @@ Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`cargo run
 - Tokens werden durch den Daemon ausgegeben (`POST /api/v1/auth/keys`) und besitzen Scopes:
   - `admin` – Vollzugriff auf alle Ressourcen.
   - `namespace` – Zugriff auf eine konkrete Namespace-ID (`scope.namespace`).
-- Der erste Key kann ohne Autorisierung angelegt werden; anschließend ist Admin-Scope erforderlich (`crates/cave-daemon/src/server.rs`).
+- Der erste Key kann ohne Autorisierung angelegt werden; anschließend ist Admin-Scope erforderlich (`crates/cave-daemon/src/main.rs:534`).
 
 Standardfehler:
 - `401 Unauthorized` – Token fehlt oder ist ungültig (`require_bearer` / `AuthError::InvalidToken`).
@@ -50,7 +50,7 @@ curl -X POST https://cave.example/api/v1/sandboxes \
       }'
 ```
 
-**Antwort (201)**
+**Antwort (200)**
 ```json
 {
   "id": "9f9c9872-2d9c-4c25-9c36-4e45be927834",
@@ -148,7 +148,7 @@ curl -X POST https://cave.example/api/v1/auth/keys \
       }'
 ```
 
-**Antwort (201)**
+**Antwort (200)**
 ```json
 {
   "token": "bkg_demo_abcdefghijklmno",
@@ -179,12 +179,12 @@ Revokiert einen Key. Erfolgreich mit HTTP 204. `404` wenn ID unbekannt (`AuthSer
 ---
 
 ## Fehlervertrag
-Jede JSON-Fehlermeldung folgt dem Schema `{"error": "..."}` (`ErrorBody`). Die genaue Nachricht entspricht dem konkreten Fehlerfall (z. B. `"missing Authorization bearer token"`, `"sandbox ... not found"`). Dies spiegelt die Implementierung in `crates/cave-daemon/src/server.rs` wider (`ApiError`).
+Jede JSON-Fehlermeldung folgt dem Schema `{"error": "..."}` (`ErrorBody`). Die genaue Nachricht entspricht dem konkreten Fehlerfall (z. B. `"missing Authorization bearer token"`, `"sandbox ... not found"`). Dies spiegelt die Implementierung in `crates/cave-daemon/src/main.rs` wider (`ApiError`).
 
 ---
 
 ## Tooling & Tests
-- Schema generieren: `make api-schema` → führt `cargo run --bin export-openapi` aus und schreibt `openapi.yaml`.
+- Schema generieren: `make api-schema` → schreibt `openapi.yaml`.
 - Validierung: `openapi-cli validate openapi.yaml` (CI + lokal) sowie `ajv validate` für `cave.yaml`.
 - Funktions- & Negativtests: `cargo test -p cave-daemon` deckt Handler- und Limit-Konvertierungen ab.
 - Dokumentation aktuell halten: bei Änderungen an Handlern sowohl diese Datei als auch `docs/cli.md`, `docs/governance.md` und `docs/Progress.md` aktualisieren.

@@ -3,4 +3,4 @@
 API_SCHEMA_OUT ?= openapi.yaml
 
 api-schema:
-	cargo run --bin export-openapi --quiet -- $(API_SCHEMA_OUT)
+	python scripts/generate_openapi.py $(API_SCHEMA_OUT)
