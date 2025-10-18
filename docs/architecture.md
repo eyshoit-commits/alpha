@@ -12,21 +12,20 @@ Begleitende Richtlinien für LLM-Agenten (Sandbox Coding Agent, Admin-Orchestrat
 
 Kernkomponenten
 ---------------
-- `service/cave` (CAVE Kernel): Verantwortlich für Sandbox‑Lifecycle (create/start/exec/stop), Isolation (namespaces, cgroups v2, seccomp), Workspace Overlay und API‑Key‑Erstellung. Exponiert REST + WebSocket + MCP `/mcp` Endpunkte.
-- `cave-daemon` (REST Daemon): Stellt `/api/v1/sandboxes*` sowie Auth/RBAC (`/api/v1/auth/keys*`) bereit; Validierung erfolgt via Bearer Token (Admin- bzw. Namespace-Scope).
-- `bkg_db`: Persistente Postgres‑ähnliche DB mit RLS, speichert Projekte, sandboxes, api_keys (verschlüsselt), model_registry, peers, policies, audit_events.
-- `bkg_llm` (Admin only): LLM Inference Adapter & Model Registry (download, verify, cache). Exponiert Admin‑LLM Endpoints.
-- `plugin_p2p`: P2P Netzwerkschicht (libp2p‑like) für modellchunks & metadata replication; opt‑in für Admin‑CAVEs.
-- `web/admin` & `web/app`: React‑Based UI; Admin UI verwaltet peers, models, keys; App UI bietet Workflow‑Canvas, Chat‑Studio und Model‑Selector.
-- `cli/cavectl`: Operator & Developer CLI (bkg init/add/exec/run/stop, peers, llm request-access).
+- `crates/cave-daemon`: Axum-basierter HTTP/MCP-Dienst. Bindet `CaveKernel` und `AuthService` ein, stellt `/api/v1/sandboxes*`, `/api/v1/auth/keys*`, `/healthz`, `/metrics` bereit und generiert via `utoipa` das OpenAPI-Schema (`scripts/generate_openapi.py`).
+- `crates/cave-kernel`: Sandbox-Orchestrierung mit `ProcessSandboxRuntime`, OverlayFS, optionalen Bubblewrap-Namespaces, seccomp-Filterung sowie Audit-Log-Writer (`audit.rs`). Verwaltet Lifecycle und Ressourcengrenzen für jede Sandbox.
+- `crates/bkg-db`: Persistenz-Layer (SQLite aktuell, Postgres/RLS geplant) für Sandboxes, Execution-Logs, API-Key-Metadaten, Rotationsevents und Audit-Artefakte. Wird direkt aus Kernel & Daemon konsumiert.
+- `web/admin` & `web/app`: Next.js Frontends mit gemeinsamer API-Client-Schicht; nutzen die Daemon-Endpoints für Lifecycle, Telemetrie und Governance.
+- `config/sandbox_config.toml` & `config/*`: Vorgabewerte für Limits sowie Sandbox- und Telemetrie-Policy.
+- `scripts/generate_openapi.py`, `Makefile`: Hilfstools für Schema-Generierung, CI-Läufe und Supply-Chain-Artefakte.
 
 Design‑Prinzipien
 -----------------
-- Clean‑Room: Konzepte aus Inspirations‑Repos werden übernommen, Code aber neu implementiert.
-- Innovation Tracking: Jede externe Inspiration wird in `docs/FEATURE_ORIGINS.md` dokumentiert (Template verpflichtend).
-- Security‑by‑Default: seccomp, cgroups, AES‑256 at rest, mTLS intern.
-- Modularität: Plugin‑Architecture; Adapter‑Trait garantiert swappable inference backends.
-- Observability: OpenTelemetry, Prometheus Metriken, append‑only Audit Logs.
+- Clean‑Room: Konzepte aus Inspirations-Repos werden übernommen, Code aber neu implementiert. Siehe `docs/FEATURE_ORIGINS.md`.
+- Innovation Tracking: Jede neue Architekturentscheidung wird mit Quelle, Tests & Reviewer dokumentiert.
+- Security-by-Default: ProcessSandboxRuntime erzwingt Namespaces/cgroups/seccomp (sobald aktiviert), API-Keys werden gehasht gespeichert, Audit-Logs sind HMAC-signiert.
+- Modularität: Kernel vs. Daemon vs. DB entkoppelt; Adapter-Traits ermöglichen austauschbare Runtimes und Inferenz-Backends.
+- Observability & Compliance: OpenTelemetry-Sampling über `CAVE_OTEL_SAMPLING_RATE`, Prometheus `/metrics`, auditierbare JSONL-Logs.
 
 Sequenzdiagramme (Mermaid)
 --------------------------
@@ -104,11 +103,13 @@ sequenceDiagram
   AdminCave-->>UserCave: subsequent requests fail (403)
 ```
 
-Komponenten‑Interaktionsmuster
------------------------------
-- Das API‑Gateway validiert Auth, Rate‑Limits und routet zu Services. Gateway konfiguriert `rate_limit_default` basierend auf RBAC‑Tabelle.  
-- Services exportieren `/healthz` und `/metrics` für K8s probes.  
-- Model Downloader führt checksum + signature verification vor dem Caching aus; Verification läuft in isolierter CAVE.
+Komponenten-Interaktionsmuster
+------------------------------
+- Axum-Router im Daemon injiziert `TraceLayer` für Request-Logging; `AuthService` erzwingt Bearer-Tokens (Admin/Namespace) und persistiert Nutzungstimestamps in `bkg-db`.
+- `CaveKernel` kapselt Runtime-Operationen: erstellt Workspaces, berechnet Limits (Fallback auf Defaults) und nutzt `AuditLogWriter`, um JSONL-Ereignisse inkl. HMAC-Signatur zu appendieren.
+- `Database::connect` entscheidet anhand `BKG_DB_DSN`/`BKG_DB_PATH` über SQLite vs. Postgres und führt Migrationen idempotent aus.
+- `ApiDoc` (`utoipa`) synchronisiert alle Pfade & Schemas; CI ruft `make api-schema` und `openapi-cli validate` auf, um Drift zu verhindern.
+- Optionaler Rotation-Webhook: `AuthService::rotate_key` persistiert Outbox-Events, Signaturen werden per `CAVE_ROTATION_WEBHOOK_SECRET` berechnet und über `/api/v1/auth/keys/rotated` verifiziert.
 
 Deployment‑Beispiel (Kubernetes)
 -------------------------------
@@ -119,9 +120,18 @@ Deployment‑Beispiel (Kubernetes)
 
 Operative Hinweise
 ------------------
-- `CAVE_OTEL_SAMPLING_RATE` ist runtime konfigurierbar; setze in Prod < 1.0.  
-- CI‑Jobs: `make api-schema`, `ajv validate`, `make sbom && make slsa` und sign SBOM with `cosign`.  
-- Lockfiles (Cargo.lock, package-lock.json) müssen committed werden; PRs ohne reproduzierbaren lockfile state werden blockiert.
-- Isolation Deployment: Bubblewrap (`bwrap`) und cgroup Root (`CAVE_CGROUP_ROOT`) müssen vor Inbetriebnahme bereitstehen; `CAVE_*_NAMESPACES/CGROUPS` Flags steuern die Aktivierung.
+- `CAVE_OTEL_SAMPLING_RATE` wird beim Start eingelesen; ungültige Werte werden geklemmt und mit Warnung geloggt.
+- Default-Limits (`ResourceLimits::default`) können via `CAVE_DEFAULT_*` überschrieben werden; Audit-Logs aktivierst du mit `CAVE_AUDIT_LOG_ENABLED=true` und optionalem `CAVE_AUDIT_LOG_HMAC_KEY` (Base64, ohne Padding).
+- SQLite-Fallback nutzt `BKG_DB_PATH`; Produktionsdeployments setzen `BKG_DB_DSN` (Postgres) und deaktivieren `BKG_DB_PATH`.
+- Bubblewrap ist optional: wenn nicht installiert und `CAVE_ISOLATION_NO_FALLBACK=true`, startet der Kernel keine Namespaces. Stelle sicher, dass `CAVE_BWRAP_PATH` & `CAVE_CGROUP_ROOT` korrekt gesetzt sind.
+- CI-Stufen: `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, `make api-schema`, `make sbom`, `make slsa`, `cosign sign-blob` (falls Schlüssel vorhanden).
+
+Compliance & Kontrollen
+-----------------------
+- **Audit-Trail**: JSONL + HMAC gemäß `AuditLogWriter`; Logs müssen nach Deploy signiert und mit WORM-Speicher archiviert werden.
+- **Schlüsselverwaltung**: Rotationen sind verpflichtend dokumentiert (`docs/Progress.md`), `CAVE_ROTATION_WEBHOOK_SECRET` darf ausschließlich aus Secret-Stores stammen.
+- **Least Privilege**: Namespace-Tokens sind auf Sandbox-Scopes beschränkt; Admin-Endpunkte erfordern Admin-Keys, was in OpenAPI reflektiert ist.
+- **Telemetry & Privacy**: Sampling-Rate dokumentiert pro Umgebung (`docs/env.md`), personenbezogene Daten werden durch `BKG_SCRUB_LOGS=true` maskiert.
+- **Deployment-Gates**: Promotion nach Staging/Prod setzt erfolgreiche Ausführung der Pflichttests und einen aktualisierten Compliance-Eintrag in `docs/Progress.md` voraus.
 
 SPDX-License-Identifier: Apache-2.0
