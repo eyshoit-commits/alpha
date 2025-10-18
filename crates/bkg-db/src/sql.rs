@@ -2,16 +2,31 @@
 
 #![allow(dead_code)]
 
-/// Draft marker for the SQL engine blueprint.
-#[derive(Debug, Default, Clone)]
-pub struct SqlEngineBlueprint;
+use anyhow::Result;
 
-impl SqlEngineBlueprint {
-    pub fn new() -> Self {
-        Self
-    }
+// TODO(bkg-db/sql): Ersetze diese Platzhalter durch eine echte SQL-Pipeline mit
+// Parser (sqlparser), Validator und AST-Normalisierung.
 
-    pub fn describe(&self) -> &'static str {
-        "sql-engine-blueprint"
+/// Placeholder AST representation used while the real parser is under development.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlAst {
+    pub raw_sql: String,
+}
+
+impl SqlAst {
+    pub fn new(raw_sql: impl Into<String>) -> Self {
+        Self {
+            raw_sql: raw_sql.into(),
+        }
     }
+}
+
+/// Contract for SQL parsers.
+pub trait SqlParser {
+    fn parse(&self, sql: &str) -> Result<SqlAst>;
+}
+
+/// Contract for validating/normalising SQL statements before planning.
+pub trait SqlValidator {
+    fn validate(&self, ast: &SqlAst) -> Result<()>;
 }

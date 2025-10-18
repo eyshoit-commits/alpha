@@ -7,6 +7,45 @@
 
 #![allow(dead_code)]
 
+use anyhow::Result;
+
+// TODO(bkg-db/kernel): Replace these placeholders with a fully fledged MVCC
+// storage engine backed by WAL + checkpoints (siehe docs/bkg-db.md).
+
+/// Transaction isolation levels supported by the future storage engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// Contract for MVCC storage engines.
+pub trait StorageEngine {
+    type Transaction: StorageTransaction;
+
+    fn begin_transaction(&self, mode: TransactionMode) -> Result<Self::Transaction>;
+    fn checkpoint(&self) -> Result<()>;
+    fn recover(&self) -> Result<()>;
+}
+
+/// Trait modelling transactional behaviour on top of the storage engine.
+pub trait StorageTransaction {
+    fn commit(self) -> Result<()>;
+    fn rollback(self) -> Result<()>;
+}
+
+/// WAL manager abstraction used by the kernel to append log entries.
+pub trait WalManager {
+    fn append(&self, bytes: &[u8]) -> Result<()>;
+    fn flush(&self) -> Result<()>;
+}
+
+/// Checkpoint manager abstraction to persist consistent state snapshots.
+pub trait CheckpointManager {
+    fn create_checkpoint(&self) -> Result<()>;
+    fn restore_latest(&self) -> Result<()>;
+}
+
 /// Draft structure representing the storage kernel blueprint.
 #[derive(Debug, Default, Clone)]
 pub struct KernelScaffold;

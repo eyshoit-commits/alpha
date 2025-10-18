@@ -2,11 +2,29 @@
 
 #![allow(dead_code)]
 
-#[derive(Debug, Default, Clone)]
-pub struct RealtimeBlueprint;
+use anyhow::Result;
+use serde_json::Value;
 
-impl RealtimeBlueprint {
-    pub fn new() -> Self {
-        Self
+// TODO(bkg-db/realtime): Entwickle WAL-basiertes Pub/Sub System + Client SDK Hooks.
+
+#[derive(Debug, Clone)]
+pub struct ChangeEvent {
+    pub channel: String,
+    pub payload: Value,
+}
+
+pub trait RealtimeHub {
+    fn publish(&self, event: ChangeEvent) -> Result<()>;
+    fn subscribe(&self, channel: &str) -> Result<RealtimeSubscription>;
+}
+
+#[derive(Debug, Clone)]
+pub struct RealtimeSubscription {
+    pub channel: String,
+}
+
+impl RealtimeSubscription {
+    pub fn cancel(self) -> Result<()> {
+        Ok(())
     }
 }
