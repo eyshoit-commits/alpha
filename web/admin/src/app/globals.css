@@ -163,3 +163,146 @@ label {
 .divide-slate-100 {
   border-color: rgba(91, 236, 146, 0.2) !important;
 }
+
+/* ============================================
+   NEON GLOW ANIMATIONS & EFFECTS
+   ============================================ */
+
+/* Neon glow pulse animation */
+@keyframes neon-pulse {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(91, 236, 146, 0.3),
+                0 0 20px rgba(91, 236, 146, 0.2),
+                0 0 30px rgba(91, 236, 146, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(91, 236, 146, 0.5),
+                0 0 40px rgba(91, 236, 146, 0.3),
+                0 0 60px rgba(91, 236, 146, 0.2);
+  }
+}
+
+/* Text glow animation */
+@keyframes text-glow {
+  0%, 100% {
+    text-shadow: 0 0 10px rgba(117, 255, 175, 0.5),
+                 0 0 20px rgba(117, 255, 175, 0.3);
+  }
+  50% {
+    text-shadow: 0 0 20px rgba(117, 255, 175, 0.8),
+                 0 0 40px rgba(117, 255, 175, 0.5),
+                 0 0 60px rgba(117, 255, 175, 0.3);
+  }
+}
+
+/* Border glow pulse */
+@keyframes border-pulse {
+  0%, 100% {
+    border-color: rgba(91, 236, 146, 0.6);
+    box-shadow: 0 0 10px rgba(91, 236, 146, 0.3);
+  }
+  50% {
+    border-color: rgba(91, 236, 146, 1);
+    box-shadow: 0 0 20px rgba(91, 236, 146, 0.6);
+  }
+}
+
+/* Neon underline effect */
+@keyframes neon-underline {
+  0% {
+    width: 0%;
+    opacity: 0;
+  }
+  100% {
+    width: 100%;
+    opacity: 1;
+  }
+}
+
+/* Apply animations to cards */
+.card-border {
+  animation: neon-pulse 3s ease-in-out infinite;
+}
+
+/* Animated glow on headings */
+h1, h2, h3 {
+  animation: text-glow 4s ease-in-out infinite;
+}
+
+/* Neon underline on links in nav */
+nav a {
+  position: relative;
+}
+
+nav a::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #5bec92, #75ffaf);
+  box-shadow: 0 0 10px rgba(91, 236, 146, 0.8);
+  transition: width 0.3s ease;
+}
+
+nav a:hover::after {
+  width: 100%;
+}
+
+/* Enhanced button glow */
+button:not(:disabled) {
+  transition: all 0.3s ease;
+}
+
+button:not(:disabled):hover {
+  box-shadow: 0 0 20px rgba(91, 236, 146, 0.4),
+              0 0 40px rgba(91, 236, 146, 0.2) !important;
+  transform: translateY(-2px);
+}
+
+/* Input focus glow enhanced */
+input:focus,
+select:focus,
+textarea:focus {
+  animation: border-pulse 2s ease-in-out infinite;
+}
+
+/* Table row hover glow */
+tbody tr:hover {
+  box-shadow: inset 0 0 20px rgba(91, 236, 146, 0.1);
+  transition: all 0.3s ease;
+}
+
+/* Glowing scrollbar */
+::-webkit-scrollbar {
+  width: 12px;
+  background: var(--color-bg-dark);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-card);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #5bec92, #75ffaf);
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(91, 236, 146, 0.5);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #75ffaf, #5bec92);
+  box-shadow: 0 0 20px rgba(91, 236, 146, 0.8);
+}
+
+/* Neon divider */
+hr {
+  border: none;
+  height: 2px;
+  background: linear-gradient(90deg, 
+    transparent, 
+    rgba(91, 236, 146, 0.8), 
+    transparent);
+  box-shadow: 0 0 10px rgba(91, 236, 146, 0.5);
+}
