@@ -295,7 +295,7 @@ impl AuthService {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RotationWebhookPayload {
     pub event: String,
     pub key_id: Uuid,
@@ -306,14 +306,14 @@ pub struct RotationWebhookPayload {
     pub key_prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RotationWebhook {
     pub event_id: Uuid,
     pub payload: RotationWebhookPayload,
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RotationOutcome {
     pub new_key: IssuedKey,
     pub previous: KeyInfo,

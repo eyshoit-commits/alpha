@@ -968,7 +968,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "API key issued",
             "content": {
               "application/json": {
@@ -1072,6 +1072,242 @@
                 ]
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "missing Authorization bearer token"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "insufficient permissions for requested scope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "unexpected internal error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/keys/rotate": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Rotate an API key",
+        "operationId": "rotateKey",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateKeyRequest"
+              },
+              "example": {
+                "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                "rate_limit": 200
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "API key rotated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedKeyResponse"
+                },
+                "example": {
+                  "token": "bkg_admin_newtokenvalue",
+                  "info": {
+                    "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+                    "scope": {
+                      "type": "admin"
+                    },
+                    "rate_limit": 200,
+                    "created_at": "2025-10-18T12:10:00Z",
+                    "key_prefix": "bkg_admin_new",
+                    "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                    "rotated_at": "2025-10-18T12:10:00Z"
+                  },
+                  "previous": {
+                    "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                    "scope": {
+                      "type": "namespace",
+                      "namespace": "demo"
+                    },
+                    "rate_limit": 100,
+                    "created_at": "2025-10-18T12:00:00Z",
+                    "last_used_at": null,
+                    "expires_at": "2025-11-17T12:00:00Z",
+                    "key_prefix": "bkg_demo_abcd"
+                  },
+                  "webhook": {
+                    "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
+                    "signature": "sha256=abc123...",
+                    "payload": {
+                      "event": "cave.auth.key.rotated",
+                      "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+                      "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                      "rotated_at": "2025-10-18T12:10:00Z",
+                      "scope": {
+                        "type": "admin"
+                      },
+                      "owner": "admin",
+                      "key_prefix": "bkg_admin_new"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "namespace query parameter is required"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "missing Authorization bearer token"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "insufficient permissions for requested scope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "sandbox 9f9c... not found"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "error": "unexpected internal error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/keys/rotated": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Verify a rotation webhook payload",
+        "operationId": "verifyRotationWebhook",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Cave-Webhook-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "HMAC signature generated with CAVE_ROTATION_WEBHOOK_SECRET."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotationWebhookPayload"
+              },
+              "example": {
+                "event": "cave.auth.key.rotated",
+                "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+                "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                "rotated_at": "2025-10-18T12:10:00Z",
+                "scope": {
+                  "type": "admin"
+                },
+                "owner": "admin",
+                "key_prefix": "bkg_admin_new"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Webhook accepted"
           },
           "401": {
             "description": "Unauthorized",
@@ -1653,6 +1889,16 @@
           "key_prefix": {
             "type": "string",
             "description": "Truncated token prefix for audit displays."
+          },
+          "rotated_from": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "rotated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
           }
         }
       },
@@ -1684,6 +1930,165 @@
             "last_used_at": null,
             "expires_at": "2025-11-17T12:00:00Z",
             "key_prefix": "bkg_demo_abcd"
+          }
+        }
+      },
+      "RotateKeyRequest": {
+        "type": "object",
+        "required": [
+          "key_id"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rate_limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Override rate limit for the rotated key (requests per minute)."
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optional TTL for the rotated key in seconds."
+          }
+        },
+        "example": {
+          "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+          "rate_limit": 200
+        }
+      },
+      "RotationWebhookPayload": {
+        "type": "object",
+        "required": [
+          "event",
+          "key_id",
+          "previous_key_id",
+          "rotated_at",
+          "scope",
+          "owner",
+          "key_prefix"
+        ],
+        "properties": {
+          "event": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "previous_key_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rotated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/KeyScope"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string"
+          }
+        },
+        "example": {
+          "event": "cave.auth.key.rotated",
+          "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+          "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+          "rotated_at": "2025-10-18T12:10:00Z",
+          "scope": {
+            "type": "admin"
+          },
+          "owner": "admin",
+          "key_prefix": "bkg_admin_new"
+        }
+      },
+      "RotationWebhookResponse": {
+        "type": "object",
+        "required": [
+          "event_id",
+          "signature",
+          "payload"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/RotationWebhookPayload"
+          }
+        }
+      },
+      "RotatedKeyResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "info",
+          "previous",
+          "webhook"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "info": {
+            "$ref": "#/components/schemas/KeyInfo"
+          },
+          "previous": {
+            "$ref": "#/components/schemas/KeyInfo"
+          },
+          "webhook": {
+            "$ref": "#/components/schemas/RotationWebhookResponse"
+          }
+        },
+        "example": {
+          "token": "bkg_admin_newtokenvalue",
+          "info": {
+            "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+            "scope": {
+              "type": "admin"
+            },
+            "rate_limit": 200,
+            "created_at": "2025-10-18T12:10:00Z",
+            "key_prefix": "bkg_admin_new",
+            "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+            "rotated_at": "2025-10-18T12:10:00Z"
+          },
+          "previous": {
+            "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+            "scope": {
+              "type": "namespace",
+              "namespace": "demo"
+            },
+            "rate_limit": 100,
+            "created_at": "2025-10-18T12:00:00Z",
+            "last_used_at": null,
+            "expires_at": "2025-11-17T12:00:00Z",
+            "key_prefix": "bkg_demo_abcd"
+          },
+          "webhook": {
+            "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
+            "signature": "sha256=abc123...",
+            "payload": {
+              "event": "cave.auth.key.rotated",
+              "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+              "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+              "rotated_at": "2025-10-18T12:10:00Z",
+              "scope": {
+                "type": "admin"
+              },
+              "owner": "admin",
+              "key_prefix": "bkg_admin_new"
+            }
           }
         }
       }

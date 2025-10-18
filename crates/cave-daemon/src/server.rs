@@ -1,6 +1,9 @@
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use crate::auth::{AuthError, AuthService, KeyInfo, KeyScope, ScopeRequirement};
+use crate::auth::{
+    AuthError, AuthService, KeyInfo, KeyScope, RotationOutcome, RotationWebhookPayload,
+    ScopeRequirement,
+};
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
@@ -46,7 +49,10 @@ pub async fn run() -> Result<()> {
         .context("initializing sandbox runtime")?;
 
     let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
-    let auth = Arc::new(AuthService::new(db.clone()));
+    let auth = Arc::new(AuthService::new(
+        db.clone(),
+        config.rotation_webhook_secret.clone(),
+    ));
     let state = Arc::new(AppState { kernel, db, auth });
 
     let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
@@ -153,6 +159,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sandboxes/:id/executions", get(list_executions))
         .route("/api/v1/sandboxes/:id", delete(delete_sandbox))
         .route("/api/v1/auth/keys", post(issue_key).get(list_keys))
+        .route("/api/v1/auth/keys/rotate", post(rotate_key))
+        .route("/api/v1/auth/keys/rotated", post(verify_rotation_webhook))
         .route("/api/v1/auth/keys/:id", delete(revoke_key))
         .with_state(state)
 }
@@ -173,6 +181,7 @@ struct AppConfig {
     default_limits: ResourceLimits,
     isolation: IsolationSettings,
     audit: AuditConfig,
+    rotation_webhook_secret: Option<Vec<u8>>,
 }
 
 impl AppConfig {
@@ -293,6 +302,22 @@ impl AppConfig {
             hmac_key: audit_hmac_key,
         };
 
+        let rotation_webhook_secret = match env::var("CAVE_ROTATION_WEBHOOK_SECRET") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        STANDARD
+                            .decode(trimmed)
+                            .context("invalid base64 in CAVE_ROTATION_WEBHOOK_SECRET")?,
+                    )
+                }
+            }
+            Err(_) => None,
+        };
+
         Ok(Self {
             listen_addr,
             db_url,
@@ -301,6 +326,7 @@ impl AppConfig {
             default_limits,
             isolation,
             audit,
+            rotation_webhook_secret,
         })
     }
 }
@@ -737,6 +763,78 @@ async fn revoke_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/keys/rotate",
+    request_body = RotateKeyBody,
+    responses(
+        (status = 200, description = "API key rotated", body = RotatedKeyResponse),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Key not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn rotate_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RotateKeyBody>,
+) -> Result<Json<RotatedKeyResponse>, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let ttl = payload.ttl_seconds.map(Duration::from_secs);
+    let outcome = state
+        .auth
+        .rotate_key(payload.key_id, payload.rate_limit, ttl)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(RotatedKeyResponse::from(outcome)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/keys/rotated",
+    request_body = RotationWebhookPayload,
+    responses(
+        (status = 204, description = "Webhook accepted"),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn verify_rotation_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RotationWebhookPayload>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let signature_header = headers
+        .get("X-Cave-Webhook-Signature")
+        .ok_or_else(|| ApiError::unauthorized("missing X-Cave-Webhook-Signature header"))?;
+    let signature = signature_header
+        .to_str()
+        .map_err(|_| ApiError::unauthorized("invalid webhook signature header encoding"))?
+        .trim();
+
+    state
+        .auth
+        .verify_rotation_signature(&payload, signature)
+        .map_err(ApiError::from)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 struct CreateSandboxBody {
     namespace: String,
@@ -769,6 +867,15 @@ struct CreateKeyBody {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+struct RotateKeyBody {
+    key_id: Uuid,
+    #[serde(default)]
+    rate_limit: Option<u32>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CreateKeyScope {
     Admin,
@@ -779,6 +886,41 @@ enum CreateKeyScope {
 struct IssuedKeyResponse {
     token: String,
     info: KeyInfo,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct RotatedKeyResponse {
+    token: String,
+    info: KeyInfo,
+    previous: KeyInfo,
+    webhook: RotationWebhookResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct RotationWebhookResponse {
+    event_id: Uuid,
+    signature: String,
+    payload: RotationWebhookPayload,
+}
+
+impl From<RotationOutcome> for RotatedKeyResponse {
+    fn from(outcome: RotationOutcome) -> Self {
+        let RotationOutcome {
+            new_key,
+            previous,
+            webhook,
+        } = outcome;
+        RotatedKeyResponse {
+            token: new_key.token,
+            info: new_key.info,
+            previous,
+            webhook: RotationWebhookResponse {
+                event_id: webhook.event_id,
+                signature: webhook.signature,
+                payload: webhook.payload,
+            },
+        }
+    }
 }
 
 impl CreateSandboxLimits {
@@ -1003,6 +1145,13 @@ impl From<AuthError> for ApiError {
                 "insufficient permissions for requested scope",
             ),
             AuthError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "key not found"),
+            AuthError::WebhookNotConfigured => {
+                ApiError::internal("rotation webhook secret is not configured")
+            }
+            AuthError::InvalidSignature => {
+                ApiError::unauthorized("rotation webhook signature mismatch")
+            }
+            AuthError::Internal(message) => ApiError::internal(message),
         }
     }
 }
@@ -1046,7 +1195,9 @@ pub mod docs {
             list_executions,
             issue_key,
             list_keys,
-            revoke_key
+            revoke_key,
+            rotate_key,
+            verify_rotation_webhook
         ),
         components(
             schemas(
@@ -1059,8 +1210,12 @@ pub mod docs {
                 ExecutionResponse,
                 ErrorBody,
                 CreateKeyBody,
+                RotateKeyBody,
                 CreateKeyScope,
                 IssuedKeyResponse,
+                RotatedKeyResponse,
+                RotationWebhookResponse,
+                RotationWebhookPayload,
                 KeyInfo,
                 KeyScope
             ),

@@ -170,6 +170,79 @@ Listet alle bekannten Keys (Admin-Scope). Antwort: Array aus `KeyInfo` Objekten 
 ### DELETE `/api/v1/auth/keys/{id}`
 Revokiert einen Key. Erfolgreich mit HTTP 204. `404` wenn ID unbekannt (`AuthService::revoke`).
 
+### POST `/api/v1/auth/keys/rotate`
+Rotiert einen bestehenden Key, erstellt einen neuen Token und liefert Webhook-Metadaten zurück (`crates/cave-daemon/src/server.rs:768-798`).
+
+```bash
+curl -X POST https://cave.example/api/v1/auth/keys/rotate \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rate_limit": 200
+      }'
+```
+
+**Antwort (200)**
+```json
+{
+  "token": "bkg_admin_newtokenvalue",
+  "info": {
+    "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+    "scope": { "type": "admin" },
+    "rate_limit": 200,
+    "created_at": "2025-10-18T12:10:00Z",
+    "key_prefix": "bkg_admin_new",
+    "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+    "rotated_at": "2025-10-18T12:10:00Z"
+  },
+  "previous": {
+    "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+    "scope": { "type": "admin" },
+    "rate_limit": 100,
+    "created_at": "2025-09-01T08:00:00Z",
+    "last_used_at": "2025-10-18T11:59:59Z",
+    "key_prefix": "bkg_admin_old"
+  },
+  "webhook": {
+    "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
+    "signature": "sha256=abc123...",
+    "payload": {
+      "event": "cave.auth.key.rotated",
+      "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+      "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+      "rotated_at": "2025-10-18T12:10:00Z",
+      "scope": { "type": "admin" },
+      "owner": "admin",
+      "key_prefix": "bkg_admin_new"
+    }
+  }
+}
+```
+
+Fehler: `404` wenn der Key nicht existiert, `403` bei Namespace-Schlüsseln sowie `401` bei ungültigen Tokens oder Signaturen.
+
+### POST `/api/v1/auth/keys/rotated`
+Validiert eine HMAC-signierte Webhook-Benachrichtigung nach einer Rotation (`crates/cave-daemon/src/server.rs:800-835`). Erwartet den Header `X-Cave-Webhook-Signature`.
+
+```bash
+curl -X POST https://cave.example/api/v1/auth/keys/rotated \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Cave-Webhook-Signature: sha256=abc123" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "event": "cave.auth.key.rotated",
+        "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+        "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rotated_at": "2025-10-18T12:10:00Z",
+        "scope": { "type": "admin" },
+        "owner": "admin",
+        "key_prefix": "bkg_admin_new"
+      }'
+```
+
+**Antwort (204)** – Kein Inhalt. Fehler: `401` bei fehlendem/ungültigem Header oder Signatur, `403` bei fehlendem Admin-Scope.
+
 ---
 
 ## Health & Metrics
