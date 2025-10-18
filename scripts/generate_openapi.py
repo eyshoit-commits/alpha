@@ -67,6 +67,41 @@ def issued_key_example() -> Dict[str, Any]:
     }
 
 
+def rotation_webhook_payload_example() -> Dict[str, Any]:
+    return {
+        "event": "cave.auth.key.rotated",
+        "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+        "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rotated_at": "2025-10-18T12:10:00Z",
+        "scope": {"type": "admin"},
+        "owner": "admin",
+        "key_prefix": "bkg_admin_new",
+    }
+
+
+def rotated_key_example() -> Dict[str, Any]:
+    previous = issued_key_example()["info"].copy()
+    current = {
+        "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+        "scope": {"type": "admin"},
+        "rate_limit": 200,
+        "created_at": "2025-10-18T12:10:00Z",
+        "key_prefix": "bkg_admin_new",
+        "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rotated_at": "2025-10-18T12:10:00Z",
+    }
+    return {
+        "token": "bkg_admin_newtokenvalue",
+        "info": current,
+        "previous": previous,
+        "webhook": {
+            "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
+            "signature": "sha256=abc123...",
+            "payload": rotation_webhook_payload_example(),
+        },
+    }
+
+
 def error_example(message: str) -> Dict[str, Any]:
     return {"error": message}
 
@@ -268,6 +303,8 @@ def build_spec() -> Dict[str, Any]:
                     "last_used_at": {"type": "string", "format": "date-time", "nullable": True},
                     "expires_at": {"type": "string", "format": "date-time", "nullable": True},
                     "key_prefix": {"type": "string", "description": "Truncated token prefix for audit displays."},
+                    "rotated_from": {"type": "string", "format": "uuid", "nullable": True},
+                    "rotated_at": {"type": "string", "format": "date-time", "nullable": True},
                 },
             },
             "IssuedKeyResponse": {
@@ -278,6 +315,66 @@ def build_spec() -> Dict[str, Any]:
                     "info": {"$ref": "#/components/schemas/KeyInfo"},
                 },
                 "example": issued_key_example(),
+            },
+            "RotateKeyRequest": {
+                "type": "object",
+                "required": ["key_id"],
+                "properties": {
+                    "key_id": {"type": "string", "format": "uuid"},
+                    "rate_limit": {
+                        "type": "integer",
+                        "format": "int32",
+                        "description": "Override rate limit for the rotated key (requests per minute).",
+                    },
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Optional TTL for the rotated key in seconds.",
+                    },
+                },
+                "example": {"key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed", "rate_limit": 200},
+            },
+            "RotationWebhookPayload": {
+                "type": "object",
+                "required": [
+                    "event",
+                    "key_id",
+                    "previous_key_id",
+                    "rotated_at",
+                    "scope",
+                    "owner",
+                    "key_prefix",
+                ],
+                "properties": {
+                    "event": {"type": "string"},
+                    "key_id": {"type": "string", "format": "uuid"},
+                    "previous_key_id": {"type": "string", "format": "uuid"},
+                    "rotated_at": {"type": "string", "format": "date-time"},
+                    "scope": {"$ref": "#/components/schemas/KeyScope"},
+                    "owner": {"type": "string"},
+                    "key_prefix": {"type": "string"},
+                },
+                "example": rotation_webhook_payload_example(),
+            },
+            "RotationWebhookResponse": {
+                "type": "object",
+                "required": ["event_id", "signature", "payload"],
+                "properties": {
+                    "event_id": {"type": "string", "format": "uuid"},
+                    "signature": {"type": "string"},
+                    "payload": {"$ref": "#/components/schemas/RotationWebhookPayload"},
+                },
+            },
+            "RotatedKeyResponse": {
+                "type": "object",
+                "required": ["token", "info", "previous", "webhook"],
+                "properties": {
+                    "token": {"type": "string"},
+                    "info": {"$ref": "#/components/schemas/KeyInfo"},
+                    "previous": {"$ref": "#/components/schemas/KeyInfo"},
+                    "webhook": {"$ref": "#/components/schemas/RotationWebhookResponse"},
+                },
+                "example": rotated_key_example(),
             },
         },
     }
@@ -611,7 +708,7 @@ def build_spec() -> Dict[str, Any]:
                     },
                 },
                 "responses": {
-                    "200": {
+                    "201": {
                         "description": "API key issued",
                         "content": {
                             "application/json": {
@@ -648,6 +745,71 @@ def build_spec() -> Dict[str, Any]:
                     "500": responses["500"],
                 },
             },
+        },
+        "/api/v1/auth/keys/rotate": {
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Rotate an API key",
+                "operationId": "rotateKey",
+                "security": [{"bearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RotateKeyRequest"},
+                            "example": components["schemas"]["RotateKeyRequest"]["example"],
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "API key rotated",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/RotatedKeyResponse"},
+                                "example": rotated_key_example(),
+                            }
+                        },
+                    },
+                    "400": responses["400"],
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "404": responses["404"],
+                    "500": responses["500"],
+                },
+            }
+        },
+        "/api/v1/auth/keys/rotated": {
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Verify a rotation webhook payload",
+                "operationId": "verifyRotationWebhook",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "X-Cave-Webhook-Signature",
+                        "in": "header",
+                        "required": True,
+                        "schema": {"type": "string"},
+                        "description": "HMAC signature generated with CAVE_ROTATION_WEBHOOK_SECRET.",
+                    }
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RotationWebhookPayload"},
+                            "example": rotation_webhook_payload_example(),
+                        }
+                    },
+                },
+                "responses": {
+                    "204": {"description": "Webhook accepted"},
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "500": responses["500"],
+                },
+            }
         },
         "/api/v1/auth/keys/{id}": {
             "delete": {

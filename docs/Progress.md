@@ -7,7 +7,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
-- Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
+- Build-/CI-Setup (Makefile + GitHub Actions Workflow) steht und führt Formatierung, Tests, OpenAPI-Generierung, Playwright und erste SBOM/SLSA-Schritte aus (`Makefile:1`, `.github/workflows/ci.yml:1`).
 - Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
@@ -50,9 +50,9 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## Governance & Betrieb
 - [x] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).
-  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/main.rs:147-210`, `crates/cave-daemon/src/auth.rs:57-310`, `crates/bkg-db/src/lib.rs:90-220`).
-- [ ] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.  
-  Status: AuthService hält Keys nur im Speicher (`crates/cave-daemon/src/auth.rs:52`). Datenmodell & Migration in `bkg_db` anlegen.
+  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/server.rs:760-848`, `crates/cave-daemon/src/auth.rs:59-332`, `crates/bkg-db/src/lib.rs:90-220`).
+- [x] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.
+  Status: AuthService liest/schreibt Keys über `bkg_db` und unterstützt Rotation samt Webhook-Signaturen (`crates/cave-daemon/src/auth.rs:59-332`, `crates/cave-daemon/src/server.rs:600-741`).
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
 - [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
