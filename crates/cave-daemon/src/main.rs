@@ -670,7 +670,7 @@ struct ExecBody {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SandboxResponse {
     id: Uuid,
     namespace: String,
@@ -708,7 +708,7 @@ impl From<SandboxRecord> for SandboxResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SandboxLimits {
     cpu_millis: u32,
     memory_mib: u64,
@@ -727,7 +727,7 @@ impl From<ResourceLimits> for SandboxLimits {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ExecResponse {
     exit_code: Option<i32>,
     stdout: Option<String>,
@@ -756,7 +756,7 @@ impl From<ExecOutcome> for ExecResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ExecutionResponse {
     command: String,
     args: Vec<String>,
@@ -915,7 +915,13 @@ fn bool_env(key: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
+    use super::auth::{AuthService, KeyScope};
     use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tower::Service;
 
     #[test]
     fn limit_conversion_roundtrip() {
