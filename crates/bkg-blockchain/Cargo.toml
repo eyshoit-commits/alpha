@@ -1,0 +1,30 @@
+[package]
+name = "bkg-blockchain"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+# NEO blockchain support
+neo3-rs = "0.1"
+secp256k1 = { version = "0.28", features = ["recovery", "rand-std"] }
+hex = "0.4"
+
+# Additional crypto
+ripemd = "0.1"
+bs58 = "0.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

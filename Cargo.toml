@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/bkg-db",
+    "crates/bkg-blockchain",
     "crates/cave-kernel",
     "crates/cave-daemon",
 ]

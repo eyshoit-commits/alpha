@@ -49,6 +49,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/audit" className="rounded-lg border-2 border-[#AF75FF]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#AF75FF] hover:bg-[#AF75FF]/20 hover:text-[#AF75FF] hover:border-[#AF75FF] hover:shadow-lg hover:shadow-[#AF75FF]/30 transition-all">
                   📜 Audit
                 </Link>
+                <Link href="/blockchain" className="rounded-lg border-2 border-[#5bec92]/50 bg-[#1a1f3a] px-5 py-2.5 text-sm font-bold text-[#5bec92] hover:bg-[#5bec92]/20 hover:text-[#5bec92] hover:border-[#5bec92] hover:shadow-lg hover:shadow-[#5bec92]/30 transition-all">
+                  🔗 Blockchain
+                </Link>
               </nav>
             </header>
             <main className="mx-auto max-w-screen-2xl">{children}</main>
