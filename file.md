@@ -22,10 +22,10 @@
 │       ├── Cargo.toml
 │       └── src/{isolation.rs,lib.rs}
 ├── docs/
-│   ├── Agents.md
 │   ├── architecture.md
 │   ├── env.md
 │   ├── FEATURE_ORIGINS.md
+│   ├── Progress.md
 │   └── roadmap.md
 ├── schema/
 │   └── cave.schema.json

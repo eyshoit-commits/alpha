@@ -63,7 +63,7 @@ Dieses Dokument priorisiert die anstehenden Arbeiten für BKG mit Fokus auf den 
 ### Dokumentation
 - Fehlende Pflichtdokumente erstellen (`docs/api.md`, `docs/cli.md`, `docs/security.md`, …).
 - `docs/FEATURE_ORIGINS.md` mit echten Einträgen und Reviewer-Signoff füllen.
-- Onboarding-Anleitung für Agents ergänzen (Querverweis zu `docs/Agents.md`, `PROMPT.md`).
+ - Onboarding-Anleitung für Agents ergänzen (Querverweis zu `AGENTS.md`, `PROMPT.md`).
 
 ### 4. BKG-DB Voll-Stack (Supabase-Klasse)
 - **Deliverables**

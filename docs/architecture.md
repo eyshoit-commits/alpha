@@ -8,7 +8,7 @@ Maintainer: @bkgoder
 ---------
 Dieses Dokument beschreibt die Systemarchitektur der BKG‑Plattform (CAVE) auf hoher Ebene, die wichtigsten Komponenten, die Interaktionen zwischen ihnen und typische Laufzeitabläufe (Sequenzdiagramme in Mermaid). Ziel ist: schnelle Orientierung für Entwickler, Reviewer und CI‑Checks.
 
-Begleitende Richtlinien für LLM-Agenten (Sandbox Coding Agent, Admin-Orchestrator, Specialized Worker) sind in `docs/Agents.md` dokumentiert.
+Begleitende Richtlinien für LLM-Agenten (Sandbox Coding Agent, Admin-Orchestrator, Specialized Worker) sind in `AGENTS.md` dokumentiert.
 
 Kernkomponenten
 ---------------

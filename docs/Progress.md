@@ -6,7 +6,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - Phase-0 Komponenten sind teilweise implementiert: Der Kernel nutzt ein Prozess-basiertes Isolation-Shim, tiefe Namespace/Seccomp-Logik und Tests fehlen noch (`crates/cave-kernel/src/lib.rs:1`).
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
-- Dokumentation ist nur für Architektur, ENV-Variablen und Agents vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `docs/Agents.md:1`).
+- Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
 - Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
 - Governance-Themen wie Rotations-Webhook, Audit-Log-Streaming und Telemetrie-Policy sind im Code bislang nicht implementiert (keine entsprechenden Module in `crates/cave-daemon` sichtbar).
 
@@ -26,8 +26,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] Fehlende Pflichtdokumente ergänzen/aktualisieren:  
   `docs/api.md`, `docs/cli.md`, `docs/deployment.md`, `docs/operations.md`, `docs/testing.md`, `docs/governance.md`, `docs/compatibility.md`.
   Status: Bisher keine Dateien vorhanden.  
-- [x] `docs/Agents.md` angelegt (Agenten-Playbook); Cross-Linking im Repo prüfen.  
-  Status: Dokument verfügbar, in `docs/architecture.md` referenziert (`docs/Agents.md:1`, `docs/architecture.md:11`).
+- [x] `AGENTS.md` angelegt (zentrales Agenten-Playbook); Cross-Linking im Repo aktuell (`AGENTS.md:1`, `docs/architecture.md:11`, `PROMPT.md:63`).
+- [x] `docs/bkg-db.md` aktualisiert; enthält nun den vollständigen Supabase/BKG-DB Prompt & Roadmap (ersetzt `docs/PROMPT_BKG_DB.md`).
 - [x] `docs/roadmap.md` hinzugefügt (Phase-0 Roadmap & Priorisierung); bei Status-Updates als Referenz nutzen.
 - [ ] `docs/FEATURE_ORIGINS.md` von Draft auf vollständige Einträge mit Commit/PR-Referenzen & Reviewer-Signoff erweitern.  
   Status: Nur Draft-Einträge ohne Commits/Signoff (`docs/FEATURE_ORIGINS.md:18`).

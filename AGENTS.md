@@ -1,1019 +1,261 @@
 # Repository Guidelines
 
-## Document Usage
-- Load this file as part of every session's context alongside README.md and PROMPT.md.
-- Treat all instructions herein as mandatory unless superseded by README updates.
-- Update the guide when repository processes evolve; keep change history in git logs.
+Version: 2.0  
+Last Updated: 2025-10-18  
+Maintainer: @bkgoder
 
-## Table of Contents
-- [Purpose & Scope](#purpose-&-scope)
-- [Repository Topology](#repository-topology)
-- [Core Principles](#core-principles)
-- [Standard Workflow](#standard-workflow)
-- [Directory Guide: crates/bkg-db](#directory-guide:-cratesbkg-db)
-- [Directory Guide: crates/cave-kernel](#directory-guide:-cratescave-kernel)
-- [Directory Guide: crates/cave-daemon](#directory-guide:-cratescave-daemon)
-- [Pre-Commit Megachecklist](#pre-commit-megachecklist)
-- [Environment Policy: Development](#environment-policy:-development)
-- [Environment Policy: Staging](#environment-policy:-staging)
-- [Environment Policy: Production](#environment-policy:-production)
-- [Release Protocol](#release-protocol)
-- [Frequently Asked Questions](#frequently-asked-questions)
-- [File Governance](#file-governance)
-- [Role Responsibility Matrix](#role-responsibility-matrix)
-- [Scenario Playbooks](#scenario-playbooks)
-- [Glossary](#glossary)
-- [Outstanding Decisions](#outstanding-decisions)
-- [Reinforcement Reminders](#reinforcement-reminders)
+---
 
-## Purpose & Scope
-This guide codifies every operational rule for contributors and automated agents within the BKG Phase-0 repository.
-Use it as the authoritative reference when preparing tasks, reviews, deployments, or sandbox operations.
-It complements the binding README v1.8.2 and supersedes prior drafts scattered across docs/Agents.md or legacy prompts.
-Always load this document alongside README, PROMPT.md, and docs/roadmap.md before starting substantive work.
+## 1. How To Use This Guide
+- Treat this document, the binding `README.md` (v1.8.2), and `PROMPT.md` as a single rule set.  
+- Load all three files plus `docs/Progress.md` and `docs/roadmap.md` at the start of every session.  
+- Update this guide whenever processes change; note the rationale in commit messages.  
+- File names in **bold** are mandatory references; inline code denotes commands or paths.
 
-## Repository Topology
-Workspace root contains Cargo.toml describing members bkg-db, cave-kernel, cave-daemon.
-Rust crates live under crates/, each with dedicated Cargo manifests and src directories.
-Operational documentation resides under docs/, including architecture, env references, roadmap, and progress tracker.
-Schema definitions live in schema/ with cave.schema.json acting as the ajv validation target for cave.yaml.
-Configuration defaults (sandbox limits, security toggles) live in config/sandbox_config.toml.
-Automation settings for the LLM tooling sit in .codex/codex_config.toml and must be updated carefully.
-Build artifacts (target/) are ignored; never commit generated binaries or incremental caches.
-Root-level AGENTS.md (this file) consolidates all contributor rules and should be opened first by automated agents.
+---
 
-## Core Principles
-Phase-0 gating is inviolable: do not enable P2P, marketplace, or distributed inference features until kernel, DB, and Web-UIs ship with tests.
-Clean-Room engineering applies to every feature: you may consult external repos for ideas but must write code from scratch.
-Security-by-default is mandatory: enforce namespaces, seccomp, cgroups, FS overlays, TLS, audit logging, and key rotation policies.
-Least-privilege access: prefer namespace-scoped keys over admin keys, justify escalations, document in Progress.md.
-Telemetry discipline: tune CAVE_OTEL_SAMPLING_RATE per environment to balance observability and cost.
-Auditability: every significant action (key issuance, sandbox exec, deploy) must emit signed JSONL audit events.
-Documentation parity: whenever you adjust code behaviour, update relevant docs (architecture, roadmap, env, feature origins).
+## 2. Repository Topology (Quick Map)
+```
+.
+├── Cargo.toml           # Workspace manifest (bkg-db, cave-kernel, cave-daemon)
+├── config/              # Sandbox configuration (`sandbox_config.toml`)
+├── crates/              # Rust crates (db, kernel, daemon)
+├── docs/                # Architecture, env, roadmap, feature origins, legacy agents guide
+├── schema/              # JSON schema (`cave.schema.json`)
+├── .codex/              # Codex/LLM agent configuration
+├── PROMPT.md            # Day-to-day operating prompt
+├── file.md              # Concise tree listing for quick orientation
+└── README.md            # Binding system prompt & implementation spec
+```
 
-## Standard Workflow
-Review README.md (system prompt, release requirements).
-Open PROMPT.md for the active coding instructions.
-Scan AGENTS.md (this guide) and docs/Progress.md for outstanding tasks.
-Inspect docs/roadmap.md to understand current milestones and blockers.
-Assess existing changes via `git status -sb`; do not overwrite uncommitted work.
-Set up environment variables (BKG_API_KEY, BKG_DB_DSN/BKG_DB_PATH) as needed.
-Create or update work plan using the plan tool (minimum two steps, no single-step plans).
-Search repository with `rg` or `rg --files`; avoid slower recursive grep by default.
-Perform edits using `apply_patch`; avoid destructive `rm`, `mv`, `git reset --hard` unless explicitly approved.
-Run `cargo fmt --all` and `cargo clippy --all-targets --all-features -- -D warnings` when touching Rust files.
-Run `cargo test` or targeted `cargo test -p crate_name` where unit/integration tests exist.
-Validate configs: `ajv validate -s schema/cave.schema.json -d cave.yaml` when editing configuration schemas.
-Trigger SBOM/SLSA pipelines (`make sbom`, `make slsa`, `cosign sign-blob`) before release-related merges.
-Update docs/Progress.md with concise status referencing file:line.
-Document test results, follow-up tasks, and open questions in final response.
-Stop or clean sandboxes via `sandbox.stop()`; never leave persistent sessions running unattended.
+Key pointers:
+- `crates/bkg-db` – persistence API & migrations (`migrations/0001_init.sql`).  
+- `crates/cave-kernel` – sandbox lifecycle orchestration (`src/lib.rs`, `src/isolation.rs`).  
+- `crates/cave-daemon` – Axum-based service exposing REST/SSE/MCP (`src/main.rs`, `src/auth.rs`).  
+- `docs/Progress.md` – live status tracker; keep references to `file:line`.  
+- `docs/roadmap.md` – Phase-0 milestones with dependencies and deliverables.  
+- `.codex/codex_config.toml` – ensures `PROMPT.md`, `AGENTS.md`, `Progress.md` are injected into the agent context.
 
-## Directory Guide: crates/bkg-db
-Purpose: Persistence layer handling sandbox metadata, key records, audit entries.
-Key Files:
-  * Cargo.toml
-  * src/lib.rs
-  * migrations/0001_init.sql
-  * tests/ (add when implementing integration tests)
-Primary Responsibilities:
-  * Provide async Database API with connection pooling and migration support via sqlx.
-  * Implement row-level security policy stubs; upgrade to Postgres with RLS soon.
-  * Expose resource limit persistence and audit event storage for the kernel.
-  * Ensure unique constraints for sandbox namespace/name combinations, returning domain errors on conflicts.
-  * Add property-based tests for serialization/deserialization of records using serde.
-Testing Notes:
-  * `cargo test -p bkg-db` to run all DB-related tests.
-  * Use `SQLX_OFFLINE=true sqlx migrate run` to verify migrations locally before PRs.
+---
 
-## Directory Guide: crates/cave-kernel
-Purpose: Sandbox orchestration library powering lifecycle management and isolation controls.
-Key Files:
-  * Cargo.toml
-  * src/lib.rs
-  * src/isolation.rs
-  * tests/ (add for integration)
-Primary Responsibilities:
-  * Manage sandbox lifecycle states (provisioned, running, stopped) and persist transitions.
-  * Apply resource limits using cgroups v2, namespaces, seccomp filters, and FS overlays.
-  * Integrate with audit logging by recording execution outcomes and durations.
-  * Expose traits and structs for runtime implementations (ProcessSandboxRuntime and future MicroVM runtimes).
-  * Emit tracing spans for start/exec/stop flows to support telemetry sampling.
-Testing Notes:
-  * `cargo test -p cave-kernel` for unit tests.
-  * Plan to add integration tests exercising actual cgroup and seccomp interactions (Linux only).
+## 3. Phase-0 Priorities (Mandatory Order)
+1. **Kernel Hardening**  
+   - Implement namespaces, seccomp, cgroups v2, FS overlay.  
+   - Add integration tests for lifecycle (`create → start → exec → stop`).  
+   - Capture signed JSONL audit events.
+2. **Persistent Database**  
+   - Migrate from SQLite prototype to Postgres with Row-Level Security.  
+   - Maintain migrations and rotation-friendly schema.  
+   - Provide integration tests covering namespace isolation.
+3. **Web-UIs**  
+   - Admin UI: model manager, key wizard, peer dashboard.  
+   - User UI: sandbox lifecycle control, telemetry view, chat studio.  
+   - Provide CI-backed end-to-end tests (Playwright/Cypress acceptable).
+4. Only after these three are production-ready (with CI artefacts: SBOM, SLSA, tests) may P2P, marketplace, or multi-agent orchestration be enabled.
 
-## Directory Guide: crates/cave-daemon
-Purpose: Axum-based service exposing REST, WebSocket, and MCP endpoints to manage sandboxes and keys.
-Key Files:
-  * Cargo.toml
-  * src/main.rs
-  * src/auth.rs
-Primary Responsibilities:
-  * Serve /api/v1/sandboxes endpoints for create/start/exec/stop/status/delete actions.
-  * Expose /healthz and /metrics endpoints for liveness/readiness and Prometheus scraping.
-  * Implement authentication service issuing namespace/admin keys with TTLs and revocation logic.
-  * Stream logs via WebSocket or SSE and ensure audit records are appended per operation.
-  * Coordinate telemetry (tracing_subscriber) including support for CAVE_OTEL_SAMPLING_RATE overrides.
-Testing Notes:
-  * `cargo test -p cave-daemon` (add integration tests using `tower::Service` or `axum::Router`).
-  * Use curl or HTTP client scripts to verify /healthz, /metrics, /api/v1/auth/keys flows locally.
+Document Phase-0 progress and evidence in **docs/Progress.md** and release notes.
 
-## Pre-Commit Megachecklist
-001. Run `cargo fmt --all` to format Rust code.
-002. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-003. Run `cargo test` (workspace) or targeted crate tests.
-004. Ensure docs/Progress.md is updated with status and file references.
-005. Update docs/roadmap.md if milestone progress changed.
-006. Validate schema changes with `ajv validate`.
-007. Attach SBOM/SLSA results if part of release pipeline.
-008. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-009. Verify AGENTS.md remains consistent with PROMPT.md and README.
-010. Confirm `file.md` summary listing stays aligned with actual structure.
-011. Run `cargo fmt --all` to format Rust code.
-012. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-013. Run `cargo test` (workspace) or targeted crate tests.
-014. Ensure docs/Progress.md is updated with status and file references.
-015. Update docs/roadmap.md if milestone progress changed.
-016. Validate schema changes with `ajv validate`.
-017. Attach SBOM/SLSA results if part of release pipeline.
-018. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-019. Verify AGENTS.md remains consistent with PROMPT.md and README.
-020. Confirm `file.md` summary listing stays aligned with actual structure.
-021. Run `cargo fmt --all` to format Rust code.
-022. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-023. Run `cargo test` (workspace) or targeted crate tests.
-024. Ensure docs/Progress.md is updated with status and file references.
-025. Update docs/roadmap.md if milestone progress changed.
-026. Validate schema changes with `ajv validate`.
-027. Attach SBOM/SLSA results if part of release pipeline.
-028. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-029. Verify AGENTS.md remains consistent with PROMPT.md and README.
-030. Confirm `file.md` summary listing stays aligned with actual structure.
-031. Run `cargo fmt --all` to format Rust code.
-032. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-033. Run `cargo test` (workspace) or targeted crate tests.
-034. Ensure docs/Progress.md is updated with status and file references.
-035. Update docs/roadmap.md if milestone progress changed.
-036. Validate schema changes with `ajv validate`.
-037. Attach SBOM/SLSA results if part of release pipeline.
-038. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-039. Verify AGENTS.md remains consistent with PROMPT.md and README.
-040. Confirm `file.md` summary listing stays aligned with actual structure.
-041. Run `cargo fmt --all` to format Rust code.
-042. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-043. Run `cargo test` (workspace) or targeted crate tests.
-044. Ensure docs/Progress.md is updated with status and file references.
-045. Update docs/roadmap.md if milestone progress changed.
-046. Validate schema changes with `ajv validate`.
-047. Attach SBOM/SLSA results if part of release pipeline.
-048. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-049. Verify AGENTS.md remains consistent with PROMPT.md and README.
-050. Confirm `file.md` summary listing stays aligned with actual structure.
-051. Run `cargo fmt --all` to format Rust code.
-052. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-053. Run `cargo test` (workspace) or targeted crate tests.
-054. Ensure docs/Progress.md is updated with status and file references.
-055. Update docs/roadmap.md if milestone progress changed.
-056. Validate schema changes with `ajv validate`.
-057. Attach SBOM/SLSA results if part of release pipeline.
-058. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-059. Verify AGENTS.md remains consistent with PROMPT.md and README.
-060. Confirm `file.md` summary listing stays aligned with actual structure.
-061. Run `cargo fmt --all` to format Rust code.
-062. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-063. Run `cargo test` (workspace) or targeted crate tests.
-064. Ensure docs/Progress.md is updated with status and file references.
-065. Update docs/roadmap.md if milestone progress changed.
-066. Validate schema changes with `ajv validate`.
-067. Attach SBOM/SLSA results if part of release pipeline.
-068. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-069. Verify AGENTS.md remains consistent with PROMPT.md and README.
-070. Confirm `file.md` summary listing stays aligned with actual structure.
-071. Run `cargo fmt --all` to format Rust code.
-072. Run `cargo clippy --all-targets --all-features -- -D warnings` to enforce lint cleanliness.
-073. Run `cargo test` (workspace) or targeted crate tests.
-074. Ensure docs/Progress.md is updated with status and file references.
-075. Update docs/roadmap.md if milestone progress changed.
-076. Validate schema changes with `ajv validate`.
-077. Attach SBOM/SLSA results if part of release pipeline.
-078. Reference docs/FEATURE_ORIGINS.md entry for new features or inspirations.
-079. Verify AGENTS.md remains consistent with PROMPT.md and README.
-080. Confirm `file.md` summary listing stays aligned with actual structure.
+---
 
-## Environment Policy: Development
-High observability, default sampling rate 1.0, sqlite fallback allowed.
-Mandatory Actions:
-  * Apply sandbox limits defined in config/sandbox_config.toml for Development.
-  * Ensure BKG_API_KEY scope matches environment (namespace vs admin).
-  * Rotate keys on schedule (admin 90d, namespace 30d, model access 1h).
-  * Validate telemetry endpoints (/metrics, OTLP collector) respond correctly.
-  * Run threat-matrix tests and audit log verifications after deployments.
-
-## Environment Policy: Staging
-Balanced telemetry, sampling 0.5, replicate production key rotation and RLS policies.
-Mandatory Actions:
-  * Apply sandbox limits defined in config/sandbox_config.toml for Staging.
-  * Ensure BKG_API_KEY scope matches environment (namespace vs admin).
-  * Rotate keys on schedule (admin 90d, namespace 30d, model access 1h).
-  * Validate telemetry endpoints (/metrics, OTLP collector) respond correctly.
-  * Run threat-matrix tests and audit log verifications after deployments.
-
-## Environment Policy: Production
-Strict security posture, sampling 0.05-0.2, Postgres + RLS mandatory, cosign signing enforced.
-Mandatory Actions:
-  * Apply sandbox limits defined in config/sandbox_config.toml for Production.
-  * Ensure BKG_API_KEY scope matches environment (namespace vs admin).
-  * Rotate keys on schedule (admin 90d, namespace 30d, model access 1h).
-  * Validate telemetry endpoints (/metrics, OTLP collector) respond correctly.
-  * Run threat-matrix tests and audit log verifications after deployments.
-
-## Release Protocol
-1. Draft release scope and verify Phase-0 dependencies satisfied (kernel isolation, RLS, Web-UI).
-2. Generate SBOM via `make sbom`; review output for completeness.
-3. Generate SLSA provenance via `make slsa`; store artifacts in secure registry.
-4. Sign SBOM using `cosign sign-blob <sbom> --key cosign.key`; archive signature references.
-5. Run full test matrix (cargo test, pytest security/, UI end-to-end tests where applicable).
-6. Verify docs (README, roadmap, Progress) reflect release content.
-7. Coordinate with Admin-Orchestrator to distribute release notes and update cosign key records.
-8. Tag release in git with signed tag; include SBOM/SLSA artifact references.
-
-## Frequently Asked Questions
-**Q:** How do I request additional sandbox resources?
-**A:** Submit a ticket to the Admin-Orchestrator with justification; update docs/Progress.md once approved.
-**Q:** Where do I document adaption of external ideas?
-**A:** Use docs/FEATURE_ORIGINS.md and include repository URL, rationale, implementation summary, tests, and no-copy statement.
-**Q:** What tests must pass before PR merge?
-**A:** At minimum cargo fmt, cargo clippy, cargo test, schema validations, and threat-matrix tests for relevant changes.
-**Q:** How are API keys rotated?
-**A:** Run rotation jobs, hit POST /api/v1/auth/keys/rotate, notify subscribers via POST /api/v1/auth/keys/rotated webhook.
-**Q:** What telemetry endpoints are required?
-**A:** All services must expose /healthz (200/503) and /metrics (Prometheus).
-**Q:** When can multi-agent orchestration be enabled?
-**A:** Only after Phase-0 deliverables (kernel, DB, Web-UI) are production-ready with tests.
-
-## File Governance
-### PROMPT.md
-- Condense operational steps for coding sessions; keep synced with AGENTS.md.
-- Mention AGENTS.md and docs/Agents.md where relevant.
-- Highlight plan tool usage, sandbox etiquette, testing obligations.
-### docs/Progress.md
-- Record current status with references to file:line.
-- Mark tasks complete with rationale, cite missing tests, and note owners.
-- Maintain sections for Phase-0 commitments, docs, CI, governance, open questions.
-### docs/roadmap.md
-- List Phase-0 tasks with deliverables, dependencies, and actions.
-- Update when milestones finish; align with Progress.md checkboxes.
-- Include supportive workstreams (CI, governance, documentation).
-### config/sandbox_config.toml
-- Ensure limits align with README Section 7 defaults.
-- Disallow overrides unless allow_override=true with recorded approval.
-- Keep security toggles (namespaces, seccomp, cgroups, overlay) enabled by default.
-### .codex/codex_config.toml
-- Guarantee include_agents_md=true so AGENTS.md is loaded into prompts.
-- Set approval policies to require confirmation for dangerous actions (filesystem delete, force push, network).
-- Disable local shell and network access to enforce sandbox usage.
-
-## Role Responsibility Matrix
+## 4. Roles & Responsibilities
 ### Sandbox Coding Agent
-- Follow AGENTS.md, PROMPT.md, README.
-- Produce code changes via apply_patch.
-- Run tests and record results.
-- Update Progress.md and propose next steps.
+- Follow `PROMPT.md`, this guide, and `README.md` for every session.  
+- Use `apply_patch` or equivalent targeted edits; never destructive git commands without approval.  
+- Run relevant tests (`cargo fmt`, `cargo clippy`, `cargo test`, schema checks) and record results.  
+- Update **docs/Progress.md** with concise status (include filenames/lines) and note open questions.  
+- Provide clear hand-off summaries with next steps.
+
 ### Admin-Orchestrator
-- Manage API keys, cosign keys, release readiness.
-- Approve sandbox overrides and monitor telemetry.
-- Ensure docs/roadmap.md and Progress.md stay accurate.
-- Coordinate multi-agent deployments post Phase-0.
+- Issue, rotate, and revoke API keys (`/api/v1/auth/keys/*`); manage rotation webhook signatures.  
+- Maintain SBOM/SLSA pipelines (`make sbom`, `make slsa`, `cosign sign-blob`).  
+- Approve sandbox limit overrides and coordinate telemetry settings (`CAVE_OTEL_SAMPLING_RATE`).  
+- Ensure documentation and roadmap stay aligned with implementation.
+
 ### Security Agent
-- Maintain docs/security.md threat matrix.
-- Run pytest security/ pipelines.
-- Audit webhook signatures, rotation logs, and telemetry configuration.
+- Maintain **docs/security.md** (Threat Matrix) and enforce CI check via `pytest security/`.  
+- Verify webhook HMAC signatures, audit log integrity, and secrets management plan.  
+- Oversee Postgres RLS deployment and rotation caches.
+
 ### Docs Agent
-- Maintain documentation set (PROMPT, AGENTS, Progress, Roadmap, Feature Origins).
-- Ensure cross-references are current and consistent.
-- Facilitate onboarding by keeping AGENTS.md accessible.
+- Keep textual assets up to date (`PROMPT.md`, `AGENTS.md`, `docs/Progress.md`, `docs/roadmap.md`, `docs/FEATURE_ORIGINS.md`).  
+- Ensure new features include provenance entries (inspiration, rationale, no-copy statement, commits, reviewers).  
+- Support onboarding by highlighting key workflows and diagrams.
 
-## Scenario Playbooks
-Scenario 001: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 002: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 003: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 004: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 005: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 006: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 007: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 008: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 009: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 010: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 011: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 012: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 013: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 014: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 015: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 016: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 017: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 018: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 019: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 020: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 021: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 022: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 023: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 024: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 025: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 026: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 027: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 028: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 029: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 030: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 031: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 032: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 033: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 034: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 035: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 036: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 037: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 038: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 039: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 040: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 041: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 042: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 043: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 044: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 045: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 046: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 047: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 048: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 049: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 050: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 051: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 052: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 053: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 054: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 055: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 056: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 057: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 058: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 059: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 060: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 061: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 062: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 063: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 064: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 065: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 066: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 067: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 068: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 069: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 070: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 071: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 072: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 073: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 074: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 075: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 076: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 077: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 078: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 079: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 080: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 081: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 082: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 083: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 084: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 085: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 086: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 087: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 088: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 089: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 090: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 091: Kernel: Add seccomp profile for syscall filtering.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 092: Kernel: Extend audit logging for exec outcomes.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 093: Kernel: Implement persistent workspace snapshotting.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 094: DB: Migrate to Postgres with RLS policies.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 095: DB: Add key rotation audit trail.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 096: DB: Implement tests for namespace scoping.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 097: Daemon: Add SSE streaming for logs.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 098: Daemon: Enforce rate limits via middleware.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 099: Daemon: Expose metrics for sandbox lifecycle durations.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
-Scenario 100: Docs: Update roadmap milestone statuses.
-    - Read relevant section in README and AGENTS.md before coding.
-    - Draft plan with at least two steps; note dependencies.
-    - Edit affected files via apply_patch; include comments where necessary.
-    - Run targeted tests; record results in final summary.
-    - Update Progress.md citing scenario number and file references.
+---
 
-## Glossary
-- **CAVE** — Isolated sandbox instance with enforced resource and security policies.
-- **Admin-CAVE** — Authoritative node responsible for model hosting, key issuance, and P2P replication.
-- **Namespace** — Logical tenant segmentation used for sandbox scoping and key permissions.
-- **MCP** — Management Control Protocol used for remote sandbox control via JSON-RPC.
-- **SBOM** — Software Bill of Materials generated via make sbom and signed with cosign.
-- **SLSA** — Supply-chain Level for Software Artifacts; produced via make slsa.
+## 5. Standard Workflow (Per Task)
+1. **Context** – Read `README.md`, `PROMPT.md`, `AGENTS.md`, `docs/Progress.md`, `docs/roadmap.md`.  
+2. **Plan** – Draft a multi-step plan (no single-step plans) using the planning tool; keep it updated.  
+3. **Investigate** – Inspect code with non-destructive commands (`rg`, `ls`, `sed`); check `git status -sb`.  
+4. **Implement** – Apply changes with `apply_patch` or crate-specific tools; respect sandbox limits.  
+5. **Validate** – Run required checks:  
+   - `cargo fmt --all`  
+   - `cargo clippy --all-targets --all-features -- -D warnings`  
+   - `cargo test [--package <name>]`  
+   - `ajv validate -s schema/cave.schema.json -d cave.yaml` (when config changes)  
+6. **Document** – Update `docs/Progress.md` (status, tests run, follow-ups), adjust roadmap/docs if scope changed.  
+7. **Report** – Summarize changes, test results, and next steps in the final message; highlight remaining risks.  
+8. **Cleanup** – Stop sandboxes (`sandbox.stop()`), ensure no persistent sessions remain, clear temporary files if needed.
 
-## Outstanding Decisions
-- Define task routing logic for multi-agent orchestration once Phase-0 completes.
-- Select secrets management solution (Vault, KMS, etc.) for cosign keys and API credentials.
-- Establish escalation policy for sandbox failures and authorization issues.
-- Document Postgres deployment strategy (Helm chart, operator) for production RLS roll-out.
-- Define UI test automation tooling (Playwright, Cypress) and integrate into CI.
+Failure to run available tests must be explicitly noted with mitigation or follow-up actions.
 
-## Reinforcement Reminders
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 1)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 1)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 1)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 1)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 1)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 1)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 1)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 2)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 2)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 2)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 2)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 2)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 2)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 2)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 3)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 3)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 3)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 3)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 3)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 3)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 3)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 4)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 4)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 4)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 4)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 4)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 4)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 4)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 5)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 5)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 5)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 5)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 5)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 5)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 5)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 6)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 6)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 6)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 6)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 6)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 6)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 6)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 7)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 7)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 7)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 7)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 7)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 7)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 7)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 8)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 8)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 8)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 8)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 8)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 8)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 8)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 9)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 9)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 9)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 9)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 9)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 9)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 9)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 10)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 10)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 10)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 10)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 10)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 10)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 10)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 11)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 11)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 11)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 11)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 11)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 11)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 11)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 12)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 12)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 12)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 12)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 12)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 12)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 12)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 13)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 13)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 13)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 13)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 13)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 13)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 13)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 14)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 14)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 14)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 14)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 14)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 14)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 14)
-- Keep README.md untouched unless performing coordinated version update with tests and signatures. (pass 15)
-- Always mention test status (run/not run, commands) in final hand-off. (pass 15)
-- Log new TODOs or blockers in docs/Progress.md Open Questions section. (pass 15)
-- Use `git status -sb` to confirm only intended files changed before commit. (pass 15)
-- Respect sandbox cleanup procedures; call sandbox.stop(). (pass 15)
-- Avoid storing large listings in prompts; keep file.md concise. (pass 15)
-- Sync AGENTS.md and PROMPT.md references whenever rules change. (pass 15)
+---
+
+## 6. Key Directories & Expectations
+### `crates/bkg-db`
+- Provide async database APIs with sqlx migrations.  
+- Enforce uniqueness for `(namespace, name)` pairs and translate DB errors to domain errors.  
+- Implement future Postgres RLS policies; keep DTOs serialized via serde.  
+- Add integration tests (`cargo test -p bkg-db`); use `SQLX_OFFLINE=true sqlx migrate run` before committing migrations.
+
+### `crates/cave-kernel`
+- Drive sandbox lifecycle, resource enforcement, and audit logging.  
+- Keep `ProcessSandboxRuntime` modular to support additional isolation implementations.  
+- Instrument lifecycle transitions with tracing.  
+- Add Linux-only integration tests when isolation primitives are in place.
+
+### `crates/cave-daemon`
+- Serve `/api/v1/sandboxes`, `/api/v1/auth/keys`, `/healthz`, `/metrics`, and `/mcp`.  
+- Ensure AuthService handles scopes, TTLs, revocation cache, and eventual rotation webhook.  
+- Stream stdout/stderr to clients with backpressure (WS/SSE).  
+- Expand `tests/` to exercise REST flows or use request-based integration tests.
+
+### `docs/`
+- `architecture.md` – keep diagrams and component descriptions current.  
+- `env.md` – enumerate mandatory environment variables (highlight sensitive flags).  
+- `roadmap.md` – align milestones with Phase-0 checklist; update as tasks close.  
+- `Progress.md` – single source of truth for current status, pending questions, and owners.  
+- `FEATURE_ORIGINS.md` – document inspirations, tests, links, and no-copy attestations.
+
+### `config/` & `schema/`
+- `sandbox_config.toml` – default limits (CPU 1 vCPU, RAM 512 MiB, Timeout 60 s, Disk 500 MiB) must match README.  
+- `cave.schema.json` – update schema whenever configuration surface changes; validate using `ajv`.
+
+---
+
+## 7. Build, Test & Development Commands
+- `cargo build` – compile entire workspace (default target: `cave-daemon`).  
+- `cargo run -p cave-daemon` – start the daemon (requires `BKG_DB_DSN` or `BKG_DB_PATH`).  
+- `cargo fmt --all` – enforce Rust formatting.  
+- `cargo clippy --all-targets --all-features -- -D warnings` – lint with warnings-as-errors.  
+- `cargo test` – workspace test suite; use `-p <crate>` for targeted runs.  
+- `SQLX_OFFLINE=true sqlx migrate run` – verify migrations offline.  
+- `make sbom`, `make slsa`, `cosign sign-blob <file>` – release artefact pipeline (ensure cosign key available).  
+- `ajv validate -s schema/cave.schema.json -d cave.yaml` – configuration validation.
+
+Record command outcomes (success/failure) in `docs/Progress.md` or final summaries.
+
+---
+
+## 8. Pre-Commit Checklist
+1. `cargo fmt --all`  
+2. `cargo clippy --all-targets --all-features -- -D warnings`  
+3. `cargo test` (or targeted crate tests)  
+4. Schema validation when configs change  
+5. Update `docs/Progress.md` and, if needed, `docs/roadmap.md`  
+6. Ensure `FEATURE_ORIGINS.md` entry exists for newly adapted ideas  
+7. Confirm documentation (PROMPT, AGENTS, architecture, env) matches code behaviour  
+8. Verify only intended files changed (`git status -sb`)  
+9. Summarize tests and open questions in final output  
+10. Clean up sandboxes and temporary artifacts
+
+---
+
+## 9. Environment Policies
+| Environment | Telemetry | Database | Notes |
+|-------------|-----------|----------|-------|
+| Development | `CAVE_OTEL_SAMPLING_RATE = 1.0` | SQLite fallback permitted | Fast iteration; treat secrets as real. |
+| Staging     | `≈ 0.5`   | Postgres + RLS | Mirror production key rotation and audit policies. |
+| Production  | `0.05 – 0.2` | Postgres + RLS | Strict security controls; cosign signing mandatory. |
+
+Always verify `/healthz` and `/metrics` before promoting builds. Record deviations in `docs/Progress.md`.
+
+---
+
+## 10. Release Protocol
+1. Confirm Phase-0 gating items complete (kernel hardening, Postgres RLS, Web-UIs).  
+2. Generate SBOM (`make sbom`) and SLSA provenance (`make slsa`).  
+3. Sign SBOM(s) with `cosign sign-blob <sbom> --key cosign.key`; store signatures securely.  
+4. Run full test matrix:  
+   - `cargo fmt`, `cargo clippy`, `cargo test`  
+   - `pytest security/` (Threat Matrix)  
+   - UI end-to-end suites (Playwright/Cypress)  
+5. Update documentation (README version, roadmap, Progress tracker, release notes).  
+6. Coordinate with Admin-Orchestrator for key rotations and telemetry adjustments.  
+7. Create signed git tag referencing SBOM/SLSA artefacts.
+
+---
+
+## 11. Security & Compliance
+- Maintain Clean-Room discipline; credit inspirations in `FEATURE_ORIGINS.md`.  
+- Rotate Admin keys every 90 days, Namespace keys every 30 days (auto-rotate after 7 days of age on use), Model access keys hourly, Session keys hourly.  
+- Implement rotation webhook (`POST /api/v1/auth/keys/rotated`) with HMAC signatures; audit all events.  
+- Keep audit logs as append-only JSONL with cryptographic signatures; store both in DB and filesystem.  
+- Enforce gateway rate limits (Admin 1000/min, Namespace 100/min, Session 50/min, Model access 200/min).  
+- Restrict secrets (`BKG_API_KEY`, `cosign.key`, TLS certs) to secure stores; never log plaintext.  
+- Verify telemetry exporters respect sampling policies; route OTLP traffic to approved collectors.
+
+---
+
+## 12. File Governance Highlights
+### `PROMPT.md`
+- Condensed working instructions; muss auf `AGENTS.md` verweisen.  
+- Enthält Erinnerungen an Planung, Tests, Dokumentation und Cleanup.
+
+### `docs/Progress.md`
+- Record current status with bullet updates referencing `file:line`.  
+- Note tests executed (or not) and assign owners to pending work.  
+- Maintain sections for Phase-0 commitments, documentation, CI, governance, open questions.
+
+### `docs/roadmap.md`
+- Reflect current milestone progress; align with Phase-0 sequence.  
+- Update deliverables, dependencies, and actions when tasks close.
+
+### `docs/FEATURE_ORIGINS.md`
+- Add entries per feature: source URL, rationale, fresh implementation summary, API impacts, testing, no-copy statement, commit/PR, reviewer sign-off.
+
+### `.codex/codex_config.toml`
+- Ensure `include_agents_md = true`, `include_prompt_file = true`, `include_progress_file = true`.  
+- Keep approval policies strict (`filesystem:delete`, `git:force-push`, `network:outgoing`).  
+- Use large-context model (`gpt-4-1106-preview`) with matching `max_context_tokens`.
+
+---
+
+## 13. Frequently Asked Questions
+- **How do I request higher sandbox limits?**  
+  Submit a request to the Admin-Orchestrator; document approval in `docs/Progress.md` and enforce via config overrides.
+- **Where do I record inspiration from external repositories?**  
+  In `docs/FEATURE_ORIGINS.md`. Include URL, rationale, design summary, tests, no-copy statement, commit/PR, reviewer.
+- **What tests are mandatory before opening a PR?**  
+  `cargo fmt`, `cargo clippy`, `cargo test`, schema validation (when applicable), `pytest security/` if security artefacts touched. Mention results in the PR description and final summary.
+- **When is multi-agent orchestration allowed?**  
+  Only after Phase-0 deliverables are production-ready and documented.
+- **What telemetry endpoints must exist?**  
+  `/healthz` (200 or 503) and `/metrics` (Prometheus format) for every service; ensure CI/liveness probes rely on them.
+- **How do I handle audit logs?**  
+  Write signed JSONL entries for lifecycle events, key operations, rotations, and deletion actions; verify integrity during reviews.
+
+---
+
+## 14. Outstanding Decisions (Track in Progress.md)
+- Define task routing for multi-agent orchestration post Phase-0.  
+- Select secrets management solution for API keys, cosign keys, and orchestrator credentials.  
+- Establish escalation procedures for sandbox failures or authorization denials.  
+- Document production Postgres deployment approach (Helm chart/operator).  
+- Choose UI testing framework (Playwright vs. Cypress) and integrate into CI.
+
+---
+
+## 15. Reinforcement Reminders
+- Keep `README.md` unchanged unless a coordinated PR updates specs, acceptance criteria, tests, SBOM, and SLSA.  
+- Always mention which tests ran (or why they were skipped) in handover messages.  
+- Log new TODOs or blockers under **docs/Progress.md → Offene Fragen / Klärungsbedarf**.  
+- Use `rg` and `rg --files` for fast searching; avoid broader `grep -R` unless required.  
+- Respect sandbox cleanup procedures (`sandbox.stop()`); never leave persistent sessions running.  
+- Sync `AGENTS.md`, `PROMPT.md` und relevante Dokumente, wenn Regeln angepasst werden.  
+- Validate the concise `file.md` tree if repository layout changes.  
+- Coordinate with the Admin-Orchestrator before large-scale refactors or infra changes.
+
+---
+
+End of document. Follow these rules to keep the repository compliant, secure, and aligned with the Phase-0 roadmap.
