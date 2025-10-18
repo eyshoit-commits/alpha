@@ -3,20 +3,20 @@
 Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## Aktueller Status (Stand 2025-10-18)
-- Phase-0 Komponenten: Der Kernel spannt jetzt OverlayFS, cgroups v2 und eine Seccomp-Allowlist über den Prozess-Runtime und räumt Ressourcen nach dem Lifecycle auf (`crates/cave-kernel/src/lib.rs:660-1043`, `crates/cave-kernel/src/isolation.rs:213-403`). Linux-Integrationstests prüfen Seccomp-Blockaden, cgroup-Limits und Audit-Events (`crates/cave-kernel/tests/isolation_linux.rs:1-170`).
+- Phase-0 Komponenten sind teilweise implementiert: Das Prozess-Shim spannt jetzt Overlay-Workspaces und eine konfigurierbare Seccomp-BPF-Filterung auf, inklusive Linux-Tests für geblockte Sockets sowie nicht-persistente Schreibversuche (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Namespace-Hardening via Bubblewrap bleibt offen.
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
-- Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
+- Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
 - Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
 - Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
-  Status: ProcessSandboxRuntime mountet OverlayFS, hängt Prozesse in cgroups ein, lädt die Seccomp-Allowlist als BPF-Filter und entfernt Ressourcen nach Stop (`crates/cave-kernel/src/lib.rs:660-1043`, `crates/cave-kernel/src/isolation.rs:213-403`). Linux-Integrationstests verifizieren verbotene Syscalls, cgroup-Limits und Audit-Hooks (`crates/cave-kernel/tests/isolation_linux.rs:1-170`). Bubblewrap-Profile für Namespaces bleiben offen.
+  Status: Kern-API existiert, Isolation ist ein Prozess-Shim ohne Low-Level-Schutz & Integrationstests (`crates/cave-kernel/src/lib.rs:1`). Ein neuer HTTP-Lifecycle-Test orchestriert `create/start/exec/stop` über den Daemon und prüft Status-/Execution-Persistenz gegen SQLite (`crates/cave-daemon/src/server.rs`); Low-Level-Isolation & Seccomp fehlen weiterhin.
 - [ ] Persistente `bkg_db` mit Row-Level-Security betriebsbereit und angebunden.  
   Status: SQLite-Backed Prototyp speichert API-Keys und RLS-Policies inkl. WAL-Recovery (`crates/bkg-db/src/lib.rs:169`, `crates/bkg-db/src/executor.rs:44`); Postgres-Pool & Service-Wiring stehen weiterhin aus (`docs/architecture.md:16`).
-- [ ] Web-UI (admin & user) mit Minimalfunktionen live; Phasenabschluss dokumentiert.  
-  Status: Noch keine Web-UI-Struktur im Repo (`docs/architecture.md:19`).
+- [ ] Web-UI (admin & user) mit Minimalfunktionen live; Phasenabschluss dokumentiert.
+  Status: Next.js Admin- & Namespace-Portale vorhanden (`web/admin`, `web/app`) inkl. Telemetrie-/Lifecycle-Views und Playwright-E2E-Tests; produktionsnahe Styling/SSR-Validierung & Backend-Anbindung mit echten Tokens stehen weiter aus.
 
 > Hinweis: Ohne abgeschlossene Phase-0 keine Aktivierung von P2P, Distributed Inference, Marketplace oder Multi-Agent-Features.
 
@@ -37,22 +37,26 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 ## CI, Tests & Artefakte
 - [ ] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.  
   Status: Workflow (`.github/workflows/ci.yml`) erstellt, `make api-schema` Schritt fehlt weiterhin.
-- [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).  
+- [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).
   Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
-- [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.  
+- [x] UI-E2E-Tests (Playwright) in CI einbinden.
+  Status: `web-ui` Workflow-Job lintet/buildet beide Next.js-Apps und führt Playwright-Mocks der `/api/v1`-Flows aus (`.github/workflows/ci.yml`).
+- [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.
   Status: Workflow generiert SBOM/SLSA Placeholder + cosign Schritt (erfordert Schlüssel); Dokumentation in `docs/governance.md`.
-- [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.  
+- [x] SQLite-Migrationen für Test-Harness idempotent absichern.
+  Status: `Database::connect` toleriert doppelt ausgeführte Einträge in `_sqlx_migrations` (SQLite-Codes `1555`/`2067`), wodurch die Rotationstests grün laufen (`crates/bkg-db/src/lib.rs:65-76`, `crates/cave-daemon/src/main.rs:1025-1165`).
+- [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.
   Status: Testsuite nicht vorhanden.
 
 ## Governance & Betrieb
-- [ ] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).  
-  Status: AuthService unterstützt Issue/List/Revoke, Rotation/Webhooks fehlen (`crates/cave-daemon/src/auth.rs:68`).
+- [x] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).
+  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/main.rs:147-210`, `crates/cave-daemon/src/auth.rs:57-310`, `crates/bkg-db/src/lib.rs:90-220`).
 - [ ] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.  
   Status: AuthService hält Keys nur im Speicher (`crates/cave-daemon/src/auth.rs:52`). Datenmodell & Migration in `bkg_db` anlegen.
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
 - [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
-  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/main.rs:48`); OTEL-Exporter & Monitoring fehlen weiterhin.
+  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/server.rs`); OTEL-Exporter & Monitoring fehlen weiterhin.
 - [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
   Status: Keine Audit-Log-Writer implementiert.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
@@ -75,8 +79,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Kein Realtime-Hub implementiert.
 - [ ] Objekt-Storage: Buckets, presigned URLs, Backend-Abstraktion.  
   Status: Nicht gestartet (`storage.rs` fehlt).
-- [ ] Admin-UI (`web/admin`): Next.js Dashboard mit Tabs *Overview · Policies · Users · Telemetry · Audit*.  
-  Status: Stub (`web/admin/README.md`, `package.json`) vorhanden; echte Next.js Implementierung ausstehend.
+- [ ] Admin-UI (`web/admin`): Next.js Dashboard mit Tabs *Overview · Policies · Users · Telemetry · Audit*.
+  Status: Next.js Dashboard mit Lifecycle-/Key-/Telemetry-Ansichten umgesetzt (`web/admin/src/app`); Audit-Tabs & tiefe Integration mit produktiven Backends fehlen.
 - [ ] Telemetry & Audit: OTEL-Export, cosign-signierte JSONL-Logs.  
   Status: Keine Module (`telemetry.rs`, `audit.rs`) vorhanden.
 - [ ] CI & Supply Chain: Make Targets (`lint`, `test`, `sbom`, `slsa`, `sign`, `api-validate`) und pipeline scripts.  

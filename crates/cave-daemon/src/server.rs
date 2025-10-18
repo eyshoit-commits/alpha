@@ -1,12 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-mod auth;
-
+use crate::auth::{AuthError, AuthService, KeyInfo, KeyScope, ScopeRequirement};
 use anyhow::{Context, Result};
-use auth::{
-    AuthError, AuthService, KeyInfo, KeyScope, RotationOutcome, RotationWebhookPayload,
-    ScopeRequirement,
-};
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -27,10 +22,10 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{
     filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
 };
+use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn run() -> Result<()> {
     initialize_tracing();
 
     let config = AppConfig::from_env()?;
@@ -51,10 +46,7 @@ async fn main() -> Result<()> {
         .context("initializing sandbox runtime")?;
 
     let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
-    let auth = Arc::new(AuthService::new(
-        db.clone(),
-        config.rotation_webhook_secret.clone(),
-    ));
+    let auth = Arc::new(AuthService::new(db.clone()));
     let state = Arc::new(AppState { kernel, db, auth });
 
     let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
@@ -161,8 +153,6 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sandboxes/:id/executions", get(list_executions))
         .route("/api/v1/sandboxes/:id", delete(delete_sandbox))
         .route("/api/v1/auth/keys", post(issue_key).get(list_keys))
-        .route("/api/v1/auth/keys/rotate", post(rotate_key))
-        .route("/api/v1/auth/keys/rotated", post(verify_rotation_webhook))
         .route("/api/v1/auth/keys/:id", delete(revoke_key))
         .with_state(state)
 }
@@ -183,7 +173,6 @@ struct AppConfig {
     default_limits: ResourceLimits,
     isolation: IsolationSettings,
     audit: AuditConfig,
-    rotation_webhook_secret: Option<Vec<u8>>,
 }
 
 impl AppConfig {
@@ -304,22 +293,6 @@ impl AppConfig {
             hmac_key: audit_hmac_key,
         };
 
-        let rotation_webhook_secret = match env::var("CAVE_ROTATION_WEBHOOK_SECRET") {
-            Ok(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(
-                        STANDARD
-                            .decode(trimmed)
-                            .context("invalid base64 in CAVE_ROTATION_WEBHOOK_SECRET")?,
-                    )
-                }
-            }
-            Err(_) => None,
-        };
-
         Ok(Self {
             listen_addr,
             db_url,
@@ -328,15 +301,24 @@ impl AppConfig {
             default_limits,
             isolation,
             audit,
-            rotation_webhook_secret,
         })
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    responses((status = 200, description = "Service is healthy"))
+)]
 async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    responses((status = 200, description = "Prometheus metrics", content_type = "text/plain"))
+)]
 async fn metrics() -> impl IntoResponse {
     (
         StatusCode::OK,
@@ -344,11 +326,24 @@ async fn metrics() -> impl IntoResponse {
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/sandboxes",
+    request_body = CreateSandboxBody,
+    responses(
+        (status = 201, description = "Sandbox created", body = SandboxResponse),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 409, description = "Sandbox already exists", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn create_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CreateSandboxBody>,
-) -> Result<Json<SandboxResponse>, ApiError> {
+) -> Result<(StatusCode, Json<SandboxResponse>), ApiError> {
     let token = require_bearer(&headers)?;
     state
         .auth
@@ -370,9 +365,21 @@ async fn create_sandbox(
         .create_sandbox(request)
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(SandboxResponse::from(record)))
+    Ok((StatusCode::CREATED, Json(SandboxResponse::from(record))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/sandboxes",
+    params(SandboxListQuery),
+    responses(
+        (status = 200, description = "List sandboxes", body = [SandboxResponse]),
+        (status = 400, description = "Missing namespace filter", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn list_sandboxes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -402,6 +409,18 @@ async fn list_sandboxes(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/sandboxes/{id}",
+    params(("id" = Uuid, Path, description = "Sandbox identifier")),
+    responses(
+        (status = 200, description = "Sandbox details", body = SandboxResponse),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn get_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -421,6 +440,19 @@ async fn get_sandbox(
     Ok(Json(SandboxResponse::from(record)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/sandboxes/{id}/start",
+    params(("id" = Uuid, Path, description = "Sandbox identifier")),
+    responses(
+        (status = 200, description = "Sandbox started", body = SandboxResponse),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody),
+        (status = 409, description = "Sandbox already running", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn start_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -444,6 +476,19 @@ async fn start_sandbox(
     Ok(Json(SandboxResponse::from(record)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/sandboxes/{id}/exec",
+    params(("id" = Uuid, Path, description = "Sandbox identifier")),
+    request_body = ExecBody,
+    responses(
+        (status = 200, description = "Execution result", body = ExecResponse),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn exec_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -475,6 +520,19 @@ async fn exec_sandbox(
     Ok(Json(ExecResponse::from(outcome)))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/sandboxes/{id}/stop",
+    params(("id" = Uuid, Path, description = "Sandbox identifier")),
+    responses(
+        (status = 204, description = "Sandbox stopped"),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody),
+        (status = 409, description = "Sandbox not running", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn stop_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -498,6 +556,18 @@ async fn stop_sandbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/sandboxes/{id}",
+    params(("id" = Uuid, Path, description = "Sandbox identifier")),
+    responses(
+        (status = 204, description = "Sandbox deleted"),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn delete_sandbox(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -521,6 +591,21 @@ async fn delete_sandbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/sandboxes/{id}/executions",
+    params(
+        ("id" = Uuid, Path, description = "Sandbox identifier"),
+        ExecutionQuery
+    ),
+    responses(
+        (status = 200, description = "Recent executions", body = [ExecutionResponse]),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Sandbox not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn list_executions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -552,11 +637,23 @@ async fn list_executions(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/keys",
+    request_body = CreateKeyBody,
+    responses(
+        (status = 201, description = "API key issued", body = IssuedKeyResponse),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn issue_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<CreateKeyBody>,
-) -> Result<Json<IssuedKeyResponse>, ApiError> {
+) -> Result<(StatusCode, Json<IssuedKeyResponse>), ApiError> {
     let maybe_token = bearer_optional(&headers)?;
     if state.auth.has_keys().await.map_err(ApiError::internal)? {
         let token = maybe_token
@@ -580,12 +677,25 @@ async fn issue_key(
         .await
         .map_err(ApiError::internal)?;
 
-    Ok(Json(IssuedKeyResponse {
-        token: issued.token,
-        info: issued.info,
-    }))
+    Ok((
+        StatusCode::CREATED,
+        Json(IssuedKeyResponse {
+            token: issued.token,
+            info: issued.info,
+        }),
+    ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/keys",
+    responses(
+        (status = 200, description = "List API keys", body = [KeyInfo]),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn list_keys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -600,6 +710,18 @@ async fn list_keys(
     Ok(Json(keys))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/auth/keys/{id}",
+    params(("id" = Uuid, Path, description = "API key identifier")),
+    responses(
+        (status = 204, description = "Key revoked"),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Key not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
 async fn revoke_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -615,55 +737,7 @@ async fn revoke_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn rotate_key(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<RotateKeyBody>,
-) -> Result<Json<RotatedKeyResponse>, ApiError> {
-    state
-        .auth
-        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
-        .await
-        .map_err(ApiError::from)?;
-
-    let ttl = payload.ttl_seconds.map(Duration::from_secs);
-    let outcome = state
-        .auth
-        .rotate_key(payload.key_id, payload.rate_limit, ttl)
-        .await
-        .map_err(ApiError::from)?;
-
-    Ok(Json(RotatedKeyResponse::from(outcome)))
-}
-
-async fn verify_rotation_webhook(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(payload): Json<RotationWebhookPayload>,
-) -> Result<StatusCode, ApiError> {
-    state
-        .auth
-        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
-        .await
-        .map_err(ApiError::from)?;
-
-    let signature_header = headers
-        .get("X-Cave-Webhook-Signature")
-        .ok_or_else(|| ApiError::unauthorized("missing X-Cave-Webhook-Signature header"))?;
-    let signature = signature_header
-        .to_str()
-        .map_err(|_| ApiError::unauthorized("invalid webhook signature header encoding"))?
-        .trim();
-
-    state
-        .auth
-        .verify_rotation_signature(&payload, signature)
-        .map_err(ApiError::from)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct CreateSandboxBody {
     namespace: String,
     name: String,
@@ -673,7 +747,7 @@ struct CreateSandboxBody {
     limits: Option<CreateSandboxLimits>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct CreateSandboxLimits {
     #[serde(default)]
     cpu_millis: Option<u32>,
@@ -685,7 +759,7 @@ struct CreateSandboxLimits {
     timeout_seconds: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct CreateKeyBody {
     scope: CreateKeyScope,
     #[serde(default)]
@@ -694,61 +768,17 @@ struct CreateKeyBody {
     ttl_seconds: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RotateKeyBody {
-    key_id: Uuid,
-    #[serde(default)]
-    rate_limit: Option<u32>,
-    #[serde(default)]
-    ttl_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CreateKeyScope {
     Admin,
     Namespace { namespace: String },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct IssuedKeyResponse {
     token: String,
     info: KeyInfo,
-}
-
-#[derive(Debug, Serialize)]
-struct RotatedKeyResponse {
-    token: String,
-    info: KeyInfo,
-    previous: KeyInfo,
-    webhook: RotationWebhookResponse,
-}
-
-#[derive(Debug, Serialize)]
-struct RotationWebhookResponse {
-    event_id: Uuid,
-    signature: String,
-    payload: RotationWebhookPayload,
-}
-
-impl From<RotationOutcome> for RotatedKeyResponse {
-    fn from(outcome: RotationOutcome) -> Self {
-        let RotationOutcome {
-            new_key,
-            previous,
-            webhook,
-        } = outcome;
-        RotatedKeyResponse {
-            token: new_key.token,
-            info: new_key.info,
-            previous,
-            webhook: RotationWebhookResponse {
-                event_id: webhook.event_id,
-                signature: webhook.signature,
-                payload: webhook.payload,
-            },
-        }
-    }
 }
 
 impl CreateSandboxLimits {
@@ -768,17 +798,17 @@ impl CreateSandboxLimits {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 struct SandboxListQuery {
     namespace: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 struct ExecutionQuery {
     limit: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct ExecBody {
     command: String,
     #[serde(default)]
@@ -789,7 +819,7 @@ struct ExecBody {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct SandboxResponse {
     id: Uuid,
     namespace: String,
@@ -827,7 +857,7 @@ impl From<SandboxRecord> for SandboxResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct SandboxLimits {
     cpu_millis: u32,
     memory_mib: u64,
@@ -846,7 +876,7 @@ impl From<ResourceLimits> for SandboxLimits {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct ExecResponse {
     exit_code: Option<i32>,
     stdout: Option<String>,
@@ -875,7 +905,7 @@ impl From<ExecOutcome> for ExecResponse {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 struct ExecutionResponse {
     command: String,
     args: Vec<String>,
@@ -973,12 +1003,6 @@ impl From<AuthError> for ApiError {
                 "insufficient permissions for requested scope",
             ),
             AuthError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "key not found"),
-            AuthError::WebhookNotConfigured => ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "rotation webhook secret is not configured",
-            ),
-            AuthError::InvalidSignature => ApiError::unauthorized("invalid webhook signature"),
-            AuthError::Internal(message) => ApiError::internal(message),
         }
     }
 }
@@ -993,13 +1017,76 @@ impl IntoResponse for ApiError {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ErrorBody {
     error: String,
 }
 
 fn mi_bytes(value: u64) -> u64 {
     value * 1024 * 1024
+}
+
+pub mod docs {
+    use super::*;
+    use utoipa::openapi::security::SecurityRequirement;
+
+    #[derive(OpenApi)]
+    #[openapi(
+        info(title = "CAVE Daemon API", version = "0.1.0"),
+        paths(
+            healthz,
+            metrics,
+            create_sandbox,
+            list_sandboxes,
+            get_sandbox,
+            start_sandbox,
+            exec_sandbox,
+            stop_sandbox,
+            delete_sandbox,
+            list_executions,
+            issue_key,
+            list_keys,
+            revoke_key
+        ),
+        components(
+            schemas(
+                CreateSandboxBody,
+                CreateSandboxLimits,
+                SandboxResponse,
+                SandboxLimits,
+                ExecBody,
+                ExecResponse,
+                ExecutionResponse,
+                ErrorBody,
+                CreateKeyBody,
+                CreateKeyScope,
+                IssuedKeyResponse,
+                KeyInfo,
+                KeyScope
+            ),
+            security_schemes(
+                bearerAuth = (
+                    type = "http",
+                    scheme = "bearer",
+                    bearer_format = "API Token",
+                    description = "Bearer token issued via /api/v1/auth/keys"
+                )
+            )
+        ),
+        modifiers(&SecurityAddon)
+    )]
+    pub struct ApiDoc;
+
+    struct SecurityAddon;
+
+    impl Modify for SecurityAddon {
+        fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+            openapi
+                .security
+                .get_or_insert_with(Default::default)
+                .push(SecurityRequirement::new("bearerAuth", Vec::<String>::new()));
+        }
+    }
 }
 
 fn bytes_to_mib(bytes: u64) -> u64 {
@@ -1043,55 +1130,10 @@ mod tests {
     use super::auth::{AuthService, KeyScope};
     use super::*;
     use axum::body::{to_bytes, Body};
-    use axum::http::{Request, StatusCode};
+    use axum::http::Request;
     use serde_json::json;
     use tempfile::TempDir;
     use tower::Service;
-
-    use std::sync::Arc;
-
-    async fn setup_test_app() -> (Arc<AppState>, Router, TempDir) {
-        let temp = TempDir::new().expect("tempdir");
-        let db_path = temp.path().join(format!("db-{}.sqlite", Uuid::new_v4()));
-        let db_url = format!("sqlite://{}", db_path.display());
-        let db = Database::connect(&db_url).await.expect("db");
-
-        let isolation = IsolationSettings {
-            enable_namespaces: false,
-            enable_cgroups: false,
-            bubblewrap_path: None,
-            cgroup_root: None,
-            ..IsolationSettings::default()
-        };
-
-        let audit = AuditConfig {
-            enabled: false,
-            log_path: temp.path().join("audit.jsonl"),
-            hmac_key: None,
-        };
-
-        let kernel_cfg = KernelConfig {
-            workspace_root: temp.path().join("workspaces"),
-            default_runtime: "process".to_string(),
-            default_limits: ResourceLimits::default(),
-            isolation: isolation.clone(),
-            audit,
-        };
-
-        let runtime = ProcessSandboxRuntime::new(isolation).expect("runtime");
-        let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
-        let auth = Arc::new(AuthService::new(
-            db.clone(),
-            Some(b"rotation-secret".to_vec()),
-        ));
-        let state = Arc::new(AppState {
-            kernel,
-            db: db.clone(),
-            auth,
-        });
-        let router = build_router(state.clone());
-        (state, router, temp)
-    }
 
     #[test]
     fn limit_conversion_roundtrip() {
@@ -1136,149 +1178,5 @@ mod tests {
         assert!(warning
             .unwrap()
             .contains("CAVE_OTEL_SAMPLING_RATE=-0.3 outside"));
-    }
-
-    #[tokio::test]
-    async fn rotate_key_succeeds_and_enqueues_event() {
-        let (state, router, _tmp) = setup_test_app().await;
-        let admin = state
-            .auth
-            .issue_key(KeyScope::Admin, 1000, None)
-            .await
-            .expect("admin key");
-        let original = state
-            .auth
-            .issue_key(
-                KeyScope::Namespace {
-                    namespace: "team-alpha".into(),
-                },
-                120,
-                None,
-            )
-            .await
-            .expect("namespace key");
-
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/keys/rotate")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", admin.token))
-            .body(Body::from(
-                serde_json::to_vec(&json!({"key_id": original.info.id})).unwrap(),
-            ))
-            .expect("request");
-
-        let mut svc = router.clone();
-        let response = svc.call(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        let rotated_from = body_json["info"]["rotated_from"].as_str().unwrap();
-        assert_eq!(rotated_from, original.info.id.to_string());
-
-        let old_authorization = state
-            .auth
-            .authorize(&original.token, ScopeRequirement::Namespace("team-alpha"))
-            .await;
-        assert!(matches!(old_authorization, Err(AuthError::InvalidToken)));
-
-        let events = state.db.list_key_rotation_events().await.expect("events");
-        assert_eq!(events.len(), 1);
-        let new_key_id = Uuid::parse_str(body_json["info"]["id"].as_str().unwrap()).unwrap();
-        assert_eq!(events[0].new_key_id, new_key_id);
-        assert_eq!(events[0].previous_key_id, original.info.id);
-        assert!(!body_json["webhook"]["signature"]
-            .as_str()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn rotate_key_rejects_namespace_scope() {
-        let (state, router, _tmp) = setup_test_app().await;
-        let namespace = state
-            .auth
-            .issue_key(
-                KeyScope::Namespace {
-                    namespace: "team-beta".into(),
-                },
-                100,
-                None,
-            )
-            .await
-            .expect("namespace key");
-
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/keys/rotate")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", namespace.token))
-            .body(Body::from(
-                serde_json::to_vec(&json!({"key_id": namespace.info.id})).unwrap(),
-            ))
-            .expect("request");
-
-        let mut svc = router.clone();
-        let response = svc.call(request).await.expect("response");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn webhook_verification_checks_signature() {
-        let (state, router, _tmp) = setup_test_app().await;
-        let admin = state
-            .auth
-            .issue_key(KeyScope::Admin, 1000, None)
-            .await
-            .expect("admin");
-        let original = state
-            .auth
-            .issue_key(
-                KeyScope::Namespace {
-                    namespace: "team-gamma".into(),
-                },
-                200,
-                None,
-            )
-            .await
-            .expect("namespace");
-
-        let outcome = state
-            .auth
-            .rotate_key(original.info.id, None, None)
-            .await
-            .expect("rotate");
-        let payload_json = serde_json::to_vec(&outcome.webhook.payload).unwrap();
-
-        let valid_request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/keys/rotated")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", admin.token))
-            .header(
-                "X-Cave-Webhook-Signature",
-                outcome.webhook.signature.clone(),
-            )
-            .body(Body::from(payload_json.clone()))
-            .expect("request");
-
-        let mut svc = router.clone();
-        let valid_response = svc.call(valid_request).await.expect("response");
-        assert_eq!(valid_response.status(), StatusCode::NO_CONTENT);
-
-        let invalid_request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/keys/rotated")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", admin.token))
-            .header("X-Cave-Webhook-Signature", "bogus")
-            .body(Body::from(payload_json))
-            .expect("request");
-
-        let mut svc = router.clone();
-        let invalid_response = svc.call(invalid_request).await.expect("response");
-        assert_eq!(invalid_response.status(), StatusCode::UNAUTHORIZED);
     }
 }

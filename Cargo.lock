@@ -228,6 +228,7 @@ dependencies = [
  "bkg-db",
  "cave-kernel",
  "chrono",
+ "hmac",
  "rand",
  "serde",
  "serde_json",

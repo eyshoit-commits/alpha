@@ -13,11 +13,17 @@ mod isolation;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use audit::{AuditEvent, AuditLogWriter};
 use bkg_db::{
@@ -32,7 +38,7 @@ use isolation::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex, task::spawn_blocking};
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
 use which::which;
@@ -82,6 +88,8 @@ pub struct IsolationSettings {
     pub seccomp_profile_path: Option<PathBuf>,
     pub seccomp_allow_syscalls: Vec<String>,
     pub fallback_to_plain: bool,
+    pub overlay: OverlayConfig,
+    pub seccomp: Option<SeccompConfig>,
 }
 
 impl Default for IsolationSettings {
@@ -96,135 +104,40 @@ impl Default for IsolationSettings {
             seccomp_profile_path: None,
             seccomp_allow_syscalls: Vec::new(),
             fallback_to_plain: true,
+            overlay: OverlayConfig::default(),
+            seccomp: None,
         }
     }
 }
 
-const DEFAULT_SECCOMP_ALLOWLIST: &[&str] = &[
-    "read",
-    "write",
-    "close",
-    "exit",
-    "exit_group",
-    "futex",
-    "sched_yield",
-    "nanosleep",
-    "clock_gettime",
-    "clock_getres",
-    "clock_nanosleep",
-    "rt_sigaction",
-    "rt_sigprocmask",
-    "rt_sigreturn",
-    "sigaltstack",
-    "set_tid_address",
-    "set_robust_list",
-    "brk",
-    "mmap",
-    "mprotect",
-    "munmap",
-    "mremap",
-    "prlimit64",
-    "getpid",
-    "getppid",
-    "gettid",
-    "getuid",
-    "geteuid",
-    "getgid",
-    "getegid",
-    "getrandom",
-    "readlink",
-    "readlinkat",
-    "open",
-    "openat",
-    "fstat",
-    "newfstatat",
-    "lseek",
-    "stat",
-    "lstat",
-    "statx",
-    "arch_prctl",
-    "dup",
-    "dup2",
-    "dup3",
-    "pipe",
-    "pipe2",
-    "ioctl",
-    "uname",
-    "access",
-    "fcntl",
-    "poll",
-    "ppoll",
-    "select",
-    "pselect6",
-    "eventfd2",
-    "timerfd_create",
-    "timerfd_settime",
-    "timerfd_gettime",
-    "chdir",
-    "fchdir",
-    "getcwd",
-    "splice",
-    "tee",
-    "vmsplice",
-    "writev",
-    "readv",
-    "pread64",
-    "pwrite64",
-    "rt_sigtimedwait",
-    "wait4",
-    "waitid",
-    "kill",
-    "tkill",
-    "tgkill",
-    "socket",
-    "socketpair",
-    "connect",
-    "accept",
-    "accept4",
-    "bind",
-    "listen",
-    "getsockname",
-    "getpeername",
-    "getsockopt",
-    "setsockopt",
-    "shutdown",
-    "sendto",
-    "sendmsg",
-    "sendmmsg",
-    "recvfrom",
-    "recvmsg",
-    "recvmmsg",
-    "clone",
-    "clone3",
-    "execve",
-    "execveat",
-    "umask",
-    "sysinfo",
-    "times",
-    "gettimeofday",
-    "setitimer",
-    "getitimer",
-    "madvise",
-    "prctl",
-];
+#[derive(Debug, Clone, Default)]
+pub struct OverlayConfig {
+    pub enabled: bool,
+}
 
-fn build_seccomp_allowlist(settings: &IsolationSettings) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut allowlist = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeccompAction {
+    Errno(i32),
+    KillProcess,
+}
 
-    for syscall in DEFAULT_SECCOMP_ALLOWLIST {
-        if seen.insert(*syscall) {
-            allowlist.push((*syscall).to_string());
-        }
+impl Default for SeccompAction {
+    fn default() -> Self {
+        Self::Errno(1)
     }
+}
 
-    for syscall in &settings.seccomp_allow_syscalls {
-        if seen.insert(syscall.as_str()) {
-            allowlist.push(syscall.clone());
-        }
+#[derive(Debug, Clone, Default)]
+pub struct SeccompConfig {
+    pub action: SeccompAction,
+    pub deny_syscalls: Vec<String>,
+}
+
+impl SeccompConfig {
+    pub fn deny(mut self, syscall: impl Into<String>) -> Self {
+        self.deny_syscalls.push(syscall.into());
+        self
     }
-
-    allowlist
 }
 
 /// High-level API exposed by the CAVE kernel.
@@ -665,9 +578,7 @@ pub struct ProcessSandboxRuntime {
 struct ProcessRuntimeInner {
     isolation: IsolationSettings,
     bubblewrap_path: Option<PathBuf>,
-    seccomp_allowlist: Option<Arc<Vec<String>>>,
-    seccomp_numbers: Option<Arc<Vec<u32>>>,
-    seccomp_profile_path: Option<PathBuf>,
+    seccomp_warned: AtomicBool,
 }
 
 impl ProcessSandboxRuntime {
@@ -711,14 +622,49 @@ impl ProcessSandboxRuntime {
         let inner = ProcessRuntimeInner {
             isolation,
             bubblewrap_path,
-            seccomp_allowlist,
-            seccomp_numbers,
-            seccomp_profile_path,
+            seccomp_warned: AtomicBool::new(false),
         };
 
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+}
+
+impl ProcessRuntimeInner {
+    #[cfg(target_os = "linux")]
+    fn apply_seccomp(&self, command: &mut Command) -> Result<()> {
+        use std::io;
+
+        if let Some(config) = self.isolation.seccomp.as_ref() {
+            if config.deny_syscalls.is_empty() {
+                return Ok(());
+            }
+
+            if self.isolation.enable_namespaces && self.bubblewrap_path.is_some() {
+                if !self.seccomp_warned.swap(true, Ordering::Relaxed) {
+                    warn!("seccomp profile is not applied when executing via bubblewrap; configure bubblewrap policies instead");
+                }
+                return Ok(());
+            }
+
+            let profile = config.clone();
+            unsafe {
+                command
+                    .pre_exec(move || install_seccomp_filter(&profile).map_err(io::Error::other));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn apply_seccomp(&self, _command: &mut Command) -> Result<()> {
+        if self.isolation.seccomp.is_some() && !self.seccomp_warned.swap(true, Ordering::Relaxed) {
+            warn!("seccomp filtering requires Linux; skipping enforcement");
+        }
+
+        Ok(())
     }
 }
 
@@ -731,21 +677,17 @@ impl SandboxRuntime for ProcessSandboxRuntime {
     ) -> Result<Arc<dyn SandboxInstance>> {
         fs::create_dir_all(workspace).await?;
 
-        let overlay = if self.inner.isolation.enable_overlayfs {
-            match prepare_overlay_dirs(workspace).await {
-                Ok(Some(dirs)) => Some(dirs),
-                Ok(None) => None,
-                Err(err) => {
-                    warn!(
-                        sandbox_id = %sandbox.id,
-                        error = %err,
-                        "failed to prepare overlay directories; continuing without overlay"
-                    );
-                    None
-                }
-            }
+        #[cfg(not(target_os = "linux"))]
+        if self.inner.isolation.overlay.enabled {
+            return Err(anyhow!("filesystem overlay isolation requires Linux"));
+        }
+
+        let persistent_root = if self.inner.isolation.overlay.enabled {
+            let root = workspace.join("root");
+            fs::create_dir_all(&root).await?;
+            root
         } else {
-            None
+            workspace.to_path_buf()
         };
 
         let cgroup_path = if self.inner.isolation.enable_cgroups {
@@ -768,16 +710,20 @@ impl SandboxRuntime for ProcessSandboxRuntime {
             None
         };
 
+        let overlay = OverlayManager::new(
+            persistent_root.clone(),
+            workspace.join(".overlay"),
+            self.inner.isolation.overlay.clone(),
+        );
+
         let instance = ProcessSandboxInstance::new(
             sandbox.id,
             workspace.to_path_buf(),
+            persistent_root,
             sandbox.limits(),
             self.inner.clone(),
             cgroup_path,
             overlay,
-            self.inner.seccomp_allowlist.clone(),
-            self.inner.seccomp_numbers.clone(),
-            self.inner.seccomp_profile_path.clone(),
         );
         Ok(Arc::new(instance))
     }
@@ -813,39 +759,33 @@ impl SandboxRuntime for ProcessSandboxRuntime {
 struct ProcessSandboxInstance {
     sandbox_id: Uuid,
     workspace_root: PathBuf,
+    persistent_root: PathBuf,
     limits: ResourceLimits,
     exec_lock: Mutex<()>,
     runtime: Arc<ProcessRuntimeInner>,
     cgroup_path: Option<PathBuf>,
-    overlay: Option<OverlayDirs>,
-    seccomp_allowlist: Option<Arc<Vec<String>>>,
-    seccomp_numbers: Option<Arc<Vec<u32>>>,
-    seccomp_profile_path: Option<PathBuf>,
+    overlay: OverlayManager,
 }
 
 impl ProcessSandboxInstance {
     fn new(
         sandbox_id: Uuid,
         workspace_root: PathBuf,
+        persistent_root: PathBuf,
         limits: ResourceLimits,
         runtime: Arc<ProcessRuntimeInner>,
         cgroup_path: Option<PathBuf>,
-        overlay: Option<OverlayDirs>,
-        seccomp_allowlist: Option<Arc<Vec<String>>>,
-        seccomp_numbers: Option<Arc<Vec<u32>>>,
-        seccomp_profile_path: Option<PathBuf>,
+        overlay: OverlayManager,
     ) -> Self {
         Self {
             sandbox_id,
             workspace_root,
+            persistent_root,
             limits,
             exec_lock: Mutex::new(()),
             runtime,
             cgroup_path,
             overlay,
-            seccomp_allowlist,
-            seccomp_numbers,
-            seccomp_profile_path,
         }
     }
 }
@@ -858,60 +798,41 @@ impl SandboxInstance for ProcessSandboxInstance {
             .timeout
             .unwrap_or_else(|| Duration::from_secs(self.limits.timeout_seconds as u64));
 
-        let active_workspace = if let Some(dirs) = self.overlay.as_ref() {
-            dirs.merged.as_path()
-        } else {
-            self.workspace_root.as_path()
-        };
-
-        let overlay_mounted = if let Some(dirs) = self.overlay.as_ref() {
-            match mount_overlay(dirs) {
-                Ok(()) => true,
-                Err(err) => {
-                    warn!(sandbox = %self.sandbox_id, error = %err, "failed to mount overlay");
-                    false
-                }
-            }
-        } else {
-            false
-        };
+        let overlay_mount = self.overlay.prepare().await?;
+        let execution_root = overlay_mount.path().to_path_buf();
+        let _overlay_guard = overlay_mount;
 
         let mut command = if self.runtime.isolation.enable_namespaces {
             if let Some(bwrap) = self.runtime.bubblewrap_path.as_ref() {
-                if self.runtime.isolation.enable_seccomp
-                    && self.seccomp_profile_path.is_none()
-                    && self.seccomp_allowlist.is_some()
-                {
-                    warn!(
-                        sandbox = %self.sandbox_id,
-                        "seccomp enabled but no profile provided for bubblewrap; skipping bwrap seccomp application"
-                    );
-                }
                 build_bubblewrap_command(
                     bwrap,
                     &request,
-                    active_workspace,
+                    &self.workspace_root,
+                    &execution_root,
                     self.sandbox_id,
-                    self.seccomp_profile_path.as_deref(),
                 )
             } else {
                 build_plain_command(
                     &request,
-                    active_workspace,
+                    &execution_root,
+                    &self.persistent_root,
                     self.sandbox_id,
-                    self.seccomp_numbers.clone(),
                 )
             }
         } else {
             build_plain_command(
                 &request,
-                active_workspace,
+                &execution_root,
+                &self.persistent_root,
                 self.sandbox_id,
-                self.seccomp_numbers.clone(),
             )
         };
 
         command.kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        if let Err(err) = self.runtime.apply_seccomp(&mut command) {
+            warn!(sandbox = %self.sandbox_id, error = %err, "failed to apply seccomp profile");
+        }
         if request.stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
@@ -1006,37 +927,343 @@ impl SandboxInstance for ProcessSandboxInstance {
     }
 }
 
-fn build_plain_command(
-    request: &ExecRequest,
-    workspace: &Path,
-    sandbox_id: Uuid,
-    seccomp_numbers: Option<Arc<Vec<u32>>>,
-) -> Command {
-    let mut command = Command::new(&request.command);
-    command.args(&request.args);
-    command.current_dir(workspace);
-    command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
+#[derive(Debug, Clone)]
+struct OverlayManager {
+    enabled: bool,
+    lower_dir: PathBuf,
+    overlay_dir: PathBuf,
+}
 
-    #[cfg(target_os = "linux")]
-    if let Some(numbers) = seccomp_numbers {
-        use std::io;
-
-        let numbers = numbers.clone();
-        unsafe {
-            std::os::unix::process::CommandExt::pre_exec(command.as_std_mut(), move || {
-                apply_seccomp_filter(&numbers)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-            });
+impl OverlayManager {
+    fn new(lower_dir: PathBuf, overlay_dir: PathBuf, config: OverlayConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            lower_dir,
+            overlay_dir,
         }
     }
 
+    #[cfg(target_os = "linux")]
+    async fn prepare(&self) -> Result<OverlayMount> {
+        if !self.enabled {
+            return Ok(OverlayMount::passthrough(self.lower_dir.clone()));
+        }
+
+        fs::create_dir_all(&self.overlay_dir).await?;
+        let session_dir = self.overlay_dir.join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&session_dir).await?;
+        let upper = session_dir.join("upper");
+        let work = session_dir.join("work");
+        let merged = session_dir.join("merged");
+        fs::create_dir_all(&upper).await?;
+        fs::create_dir_all(&work).await?;
+        fs::create_dir_all(&merged).await?;
+
+        let lower = self.lower_dir.clone();
+        let upper_clone = upper.clone();
+        let work_clone = work.clone();
+        let merged_clone = merged.clone();
+        spawn_blocking(move || -> Result<()> {
+            mount_overlay(&lower, &upper_clone, &work_clone, &merged_clone)?;
+            Ok(())
+        })
+        .await??;
+
+        Ok(OverlayMount::mounted(merged, session_dir))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn prepare(&self) -> Result<OverlayMount> {
+        if self.enabled {
+            Err(anyhow!("filesystem overlay isolation requires Linux"))
+        } else {
+            Ok(OverlayMount::passthrough(self.lower_dir.clone()))
+        }
+    }
+}
+
+struct OverlayMount {
+    path: PathBuf,
+    _cleanup: Option<OverlayCleanup>,
+}
+
+impl OverlayMount {
+    fn passthrough(path: PathBuf) -> Self {
+        Self {
+            path,
+            _cleanup: None,
+        }
+    }
+
+    fn mounted(path: PathBuf, session_dir: PathBuf) -> Self {
+        Self {
+            path: path.clone(),
+            _cleanup: Some(OverlayCleanup {
+                merged: path,
+                session_dir,
+            }),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+struct OverlayCleanup {
+    merged: PathBuf,
+    session_dir: PathBuf,
+}
+
+impl Drop for OverlayCleanup {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(err) = unmount_overlay(&self.merged) {
+                warn!(path = %self.merged.display(), error = %err, "failed to unmount overlay");
+            }
+        }
+
+        if let Err(err) = std::fs::remove_dir_all(&self.session_dir) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %self.session_dir.display(), error = %err, "failed to clean overlay workspace");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
+    use anyhow::Context;
+    use std::ffi::CString;
+
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+
+    let source = CString::new("overlay").expect("static string");
+    let fstype = CString::new("overlay").expect("static string");
+    let target = path_to_cstring(merged)?;
+    let data_c = CString::new(data).context("overlay mount options")?;
+
+    let result = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            data_c.as_ptr() as *const libc::c_void,
+        )
+    };
+
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("mount overlay at {}", merged.display()));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_overlay(path: &Path) -> Result<()> {
+    use anyhow::Context;
+
+    let target = path_to_cstring(path)?;
+    let result = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("unmount overlay at {}", path.display()));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
+    use anyhow::Context;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("convert {} to CString", path.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn install_seccomp_filter(config: &SeccompConfig) -> Result<()> {
+    use anyhow::Context;
+
+    if config.deny_syscalls.is_empty() {
+        return Ok(());
+    }
+
+    let syscalls = config
+        .deny_syscalls
+        .iter()
+        .map(|name| resolve_syscall_number(name))
+        .collect::<Result<Vec<_>>>()?;
+
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NO_NEW_PRIVS)");
+        }
+    }
+
+    let mut filter = Vec::with_capacity(syscalls.len() * 2 + 5);
+    filter.push(bpf_stmt(
+        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        SECCOMP_DATA_ARCH_OFFSET,
+    ));
+    filter.push(bpf_jump(
+        (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        audit_arch(),
+        0,
+        1,
+    ));
+    filter.push(bpf_stmt(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        libc::SECCOMP_RET_KILL_PROCESS,
+    ));
+    filter.push(bpf_stmt(
+        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        SECCOMP_DATA_NR_OFFSET,
+    ));
+
+    let deny_action = match config.action {
+        SeccompAction::Errno(errno) => libc::SECCOMP_RET_ERRNO | ((errno as u32) & 0x7fff),
+        SeccompAction::KillProcess => libc::SECCOMP_RET_KILL_PROCESS,
+    };
+
+    for syscall in syscalls {
+        filter.push(bpf_jump(
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            syscall,
+            0,
+            1,
+        ));
+        filter.push(bpf_stmt((libc::BPF_RET | libc::BPF_K) as u16, deny_action));
+    }
+
+    filter.push(bpf_stmt(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        libc::SECCOMP_RET_ALLOW,
+    ));
+
+    let prog = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_mut_ptr(),
+    };
+
+    unsafe {
+        if libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const _ as *const std::ffi::c_void,
+            0,
+            0,
+        ) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_SECCOMP)");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter { code, jt, jf, k }
+}
+
+#[cfg(target_os = "linux")]
+fn audit_arch() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        0xC000_003E
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        0xC000_00B7
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        0xC000_003E
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_syscall_number(name: &str) -> Result<u32> {
+    if let Ok(value) = name.parse::<i64>() {
+        if value < 0 {
+            return Err(anyhow!("invalid syscall number {}", value));
+        }
+        return Ok(value as u32);
+    }
+
+    let number = match name {
+        "clone" => libc::SYS_clone,
+        "execve" => libc::SYS_execve,
+        "fork" => libc::SYS_fork,
+        "kill" => libc::SYS_kill,
+        "mount" => libc::SYS_mount,
+        "open" => libc::SYS_open,
+        "openat" => libc::SYS_openat,
+        "pivot_root" => libc::SYS_pivot_root,
+        "ptrace" => libc::SYS_ptrace,
+        "setgid" => libc::SYS_setgid,
+        "setuid" => libc::SYS_setuid,
+        "socket" => libc::SYS_socket,
+        "umount" => libc::SYS_umount2,
+        "unshare" => libc::SYS_unshare,
+        "chmod" => libc::SYS_chmod,
+        "chown" => libc::SYS_chown,
+        "mknod" => libc::SYS_mknod,
+        other => {
+            return Err(anyhow!("unknown syscall '{}' in seccomp profile", other));
+        }
+    };
+
+    Ok(number as u32)
+}
+
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+
+fn build_plain_command(
+    request: &ExecRequest,
+    workdir: &Path,
+    persistent_root: &Path,
+    sandbox_id: Uuid,
+) -> Command {
+    let mut command = Command::new(&request.command);
+    command.args(&request.args);
+    command.current_dir(workdir);
+    command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
+    command.env("BKG_SANDBOX_WORKDIR", workdir);
+    command.env("BKG_SANDBOX_ROOT", persistent_root);
     command
 }
 
 fn build_bubblewrap_command(
     bwrap_path: &Path,
     request: &ExecRequest,
-    workspace: &Path,
+    workspace_root: &Path,
+    execution_root: &Path,
     sandbox_id: Uuid,
     seccomp_profile: Option<&Path>,
 ) -> Command {
@@ -1058,8 +1285,11 @@ fn build_bubblewrap_command(
     }
 
     command.arg("--dev-bind").arg("/dev").arg("/dev");
-    command.arg("--bind").arg(workspace).arg(workspace);
-    command.arg("--chdir").arg(workspace);
+    command
+        .arg("--bind")
+        .arg(execution_root)
+        .arg(workspace_root);
+    command.arg("--chdir").arg(workspace_root);
     command.arg("--tmpfs").arg("/tmp");
     command
         .arg("--setenv")
@@ -1069,6 +1299,14 @@ fn build_bubblewrap_command(
         .arg("--setenv")
         .arg("BKG_SANDBOX_ID")
         .arg(sandbox_id.to_string());
+    command
+        .arg("--setenv")
+        .arg("BKG_SANDBOX_WORKDIR")
+        .arg(workspace_root);
+    command
+        .arg("--setenv")
+        .arg("BKG_SANDBOX_ROOT")
+        .arg(workspace_root);
 
     if let Some(profile) = seccomp_profile {
         command.arg("--seccomp").arg(profile);

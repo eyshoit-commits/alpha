@@ -1,0 +1,20 @@
+{
+  "name": "@alpha/web",
+  "private": true,
+  "packageManager": "npm@10.8.1",
+  "workspaces": [
+    "admin",
+    "app"
+  ],
+  "scripts": {
+    "build": "npm run build -w admin && npm run build -w app",
+    "lint": "npm run lint -w admin && npm run lint -w app",
+    "dev": "npm run dev -w admin",
+    "test:e2e": "playwright test",
+    "playwright": "npx playwright"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.46.1",
+    "typescript": "5.5.4"
+  }
+}
