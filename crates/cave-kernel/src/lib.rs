@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bkg_db::{
     self, Database, ExecutionRecord, NewSandbox, ResourceLimits, SandboxError, SandboxRecord,
@@ -28,9 +28,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex};
-use tracing::{debug, info, instrument, warn};
-use which::which;
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
+use which::which;
 
 const DEFAULT_RUNTIME_KIND: &str = "process";
 
@@ -448,9 +448,55 @@ pub trait SandboxInstance: Send + Sync + 'static {
     async fn stop(&self) -> Result<()>;
 }
 
-/// Process-based runtime adapter (no real OS sandboxing yet, just workspace scoping).
+/// Process-based runtime adapter wrapping OS isolation primitives when available.
 #[derive(Debug, Clone)]
-pub struct ProcessSandboxRuntime;
+pub struct ProcessSandboxRuntime {
+    inner: Arc<ProcessRuntimeInner>,
+}
+
+#[derive(Debug)]
+struct ProcessRuntimeInner {
+    isolation: IsolationSettings,
+    bubblewrap_path: Option<PathBuf>,
+}
+
+impl ProcessSandboxRuntime {
+    pub fn new(mut isolation: IsolationSettings) -> Result<Self> {
+        let bubblewrap_path = if isolation.enable_namespaces {
+            if let Some(explicit) = isolation.bubblewrap_path.clone() {
+                Some(explicit)
+            } else {
+                which("bwrap").ok()
+            }
+        } else {
+            None
+        };
+
+        let bubblewrap_path = match bubblewrap_path {
+            Some(path) => Some(path),
+            None if isolation.enable_namespaces && !isolation.fallback_to_plain => {
+                return Err(anyhow!(
+                    "bubblewrap binary not found and fallback disabled; cannot enable namespaces"
+                ));
+            }
+            None if isolation.enable_namespaces => {
+                warn!("bubblewrap not found; falling back to plain process execution");
+                isolation.enable_namespaces = false;
+                None
+            }
+            None => None,
+        };
+
+        let inner = ProcessRuntimeInner {
+            isolation,
+            bubblewrap_path,
+        };
+
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+}
 
 #[async_trait]
 impl SandboxRuntime for ProcessSandboxRuntime {
@@ -460,15 +506,50 @@ impl SandboxRuntime for ProcessSandboxRuntime {
         workspace: &Path,
     ) -> Result<Arc<dyn SandboxInstance>> {
         fs::create_dir_all(workspace).await?;
-        let instance =
-            ProcessSandboxInstance::new(sandbox.id, workspace.to_path_buf(), sandbox.limits());
+
+        let cgroup_path = if self.inner.isolation.enable_cgroups {
+            if let Some(root) = self.inner.isolation.cgroup_root.as_ref() {
+                match prepare_cgroup(root, sandbox.id, sandbox.limits()).await {
+                    Ok(path) => Some(path),
+                    Err(err) => {
+                        warn!(
+                            sandbox_id = %sandbox.id,
+                            error = %err,
+                            "failed to initialize cgroup; continuing without cgroup limits"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let instance = ProcessSandboxInstance::new(
+            sandbox.id,
+            workspace.to_path_buf(),
+            sandbox.limits(),
+            self.inner.clone(),
+            cgroup_path,
+        );
         Ok(Arc::new(instance))
     }
 
-    async fn destroy(&self, _sandbox_id: Uuid, workspace: &Path) -> Result<()> {
+    async fn destroy(&self, sandbox_id: Uuid, workspace: &Path) -> Result<()> {
         if fs::metadata(workspace).await.is_ok() {
             fs::remove_dir_all(workspace).await?;
         }
+
+        if self.inner.isolation.enable_cgroups {
+            if let Some(root) = self.inner.isolation.cgroup_root.as_ref() {
+                if let Err(err) = cleanup_cgroup(root, sandbox_id).await {
+                    warn!(sandbox_id = %sandbox_id, error = %err, "failed to cleanup cgroup");
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -479,15 +560,25 @@ struct ProcessSandboxInstance {
     workspace: PathBuf,
     limits: ResourceLimits,
     exec_lock: Mutex<()>,
+    runtime: Arc<ProcessRuntimeInner>,
+    cgroup_path: Option<PathBuf>,
 }
 
 impl ProcessSandboxInstance {
-    fn new(sandbox_id: Uuid, workspace: PathBuf, limits: ResourceLimits) -> Self {
+    fn new(
+        sandbox_id: Uuid,
+        workspace: PathBuf,
+        limits: ResourceLimits,
+        runtime: Arc<ProcessRuntimeInner>,
+        cgroup_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             sandbox_id,
             workspace,
             limits,
             exec_lock: Mutex::new(()),
+            runtime,
+            cgroup_path,
         }
     }
 }
@@ -500,10 +591,16 @@ impl SandboxInstance for ProcessSandboxInstance {
             .timeout
             .unwrap_or_else(|| Duration::from_secs(self.limits.timeout_seconds as u64));
 
-        let mut command = Command::new(&request.command);
-        command.args(&request.args);
-        command.current_dir(&self.workspace);
-        command.env("BKG_SANDBOX_ID", self.sandbox_id.to_string());
+        let mut command = if self.runtime.isolation.enable_namespaces {
+            if let Some(bwrap) = self.runtime.bubblewrap_path.as_ref() {
+                build_bubblewrap_command(bwrap, &request, &self.workspace, self.sandbox_id)
+            } else {
+                build_plain_command(&request, &self.workspace, self.sandbox_id)
+            }
+        } else {
+            build_plain_command(&request, &self.workspace, self.sandbox_id)
+        };
+
         command.kill_on_drop(true);
         if request.stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
@@ -513,6 +610,14 @@ impl SandboxInstance for ProcessSandboxInstance {
 
         let start = Instant::now();
         let mut child = command.spawn()?;
+
+        if let Some(path) = self.cgroup_path.as_ref() {
+            if let Some(pid) = child.id() {
+                if let Err(err) = add_pid_to_cgroup(path, pid).await {
+                    warn!(sandbox = %self.sandbox_id, error = %err, "failed to attach process to cgroup");
+                }
+            }
+        }
 
         if let Some(input) = request.stdin {
             if let Some(mut stdin) = child.stdin.take() {
@@ -560,9 +665,62 @@ impl SandboxInstance for ProcessSandboxInstance {
     }
 
     async fn stop(&self) -> Result<()> {
-        // No persistent subprocess to shutdown yet; future runtimes may hold state.
         Ok(())
     }
+}
+
+fn build_plain_command(request: &ExecRequest, workspace: &Path, sandbox_id: Uuid) -> Command {
+    let mut command = Command::new(&request.command);
+    command.args(&request.args);
+    command.current_dir(workspace);
+    command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
+    command
+}
+
+fn build_bubblewrap_command(
+    bwrap_path: &Path,
+    request: &ExecRequest,
+    workspace: &Path,
+    sandbox_id: Uuid,
+) -> Command {
+    let mut command = Command::new(bwrap_path);
+    command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
+    command.arg("--die-with-parent");
+    command.arg("--new-session");
+    command.arg("--unshare-pid");
+    command.arg("--unshare-uts");
+    command.arg("--unshare-ipc");
+    command.arg("--unshare-net");
+    command.arg("--unshare-cgroup");
+    command.arg("--proc").arg("/proc");
+
+    for path in ro_bind_candidates() {
+        if std::path::Path::new(path).exists() {
+            command.arg("--ro-bind").arg(path).arg(path);
+        }
+    }
+
+    command.arg("--dev-bind").arg("/dev").arg("/dev");
+    command.arg("--bind").arg(workspace).arg(workspace);
+    command.arg("--chdir").arg(workspace);
+    command.arg("--tmpfs").arg("/tmp");
+    command
+        .arg("--setenv")
+        .arg("PATH")
+        .arg("/usr/bin:/bin:/sbin");
+    command
+        .arg("--setenv")
+        .arg("BKG_SANDBOX_ID")
+        .arg(sandbox_id.to_string());
+
+    command.arg("--");
+    command.arg(&request.command);
+    command.args(&request.args);
+    command
+}
+
+fn ro_bind_candidates() -> &'static [&'static str] {
+    &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
 }
 
 fn sanitize_component(input: &str) -> String {
@@ -582,7 +740,11 @@ mod tests {
     #[tokio::test]
     async fn create_start_exec_stop_flow() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let kernel = CaveKernel::new(db, ProcessSandboxRuntime, KernelConfig::default());
+        let mut config = KernelConfig::default();
+        config.isolation.enable_cgroups = false;
+        config.isolation.enable_namespaces = false;
+        let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
+        let kernel = CaveKernel::new(db, runtime, config);
 
         let created = kernel
             .create_sandbox(CreateSandboxRequest::new("ns", "sandbox"))

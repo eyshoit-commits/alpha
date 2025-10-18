@@ -10,8 +10,8 @@ use axum::{
 };
 use bkg_db::{Database, ExecutionRecord, ResourceLimits, SandboxRecord};
 use cave_kernel::{
-    CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, KernelConfig, KernelError,
-    ProcessSandboxRuntime,
+    CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings, KernelConfig,
+    KernelError, ProcessSandboxRuntime,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -33,8 +33,12 @@ async fn main() -> Result<()> {
     kernel_cfg.workspace_root = config.workspace_root.clone();
     kernel_cfg.default_runtime = config.default_runtime.clone();
     kernel_cfg.default_limits = config.default_limits;
+    kernel_cfg.isolation = config.isolation.clone();
 
-    let kernel = CaveKernel::new(db.clone(), ProcessSandboxRuntime, kernel_cfg);
+    let runtime = ProcessSandboxRuntime::new(kernel_cfg.isolation.clone())
+        .context("initializing sandbox runtime")?;
+
+    let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
     let state = Arc::new(AppState { kernel, db });
 
     let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
@@ -88,6 +92,7 @@ struct AppConfig {
     workspace_root: PathBuf,
     default_runtime: String,
     default_limits: ResourceLimits,
+    isolation: IsolationSettings,
 }
 
 impl AppConfig {
@@ -133,12 +138,60 @@ impl AppConfig {
                 .unwrap_or(base_limits.timeout_seconds),
         };
 
+        let mut isolation = IsolationSettings::default();
+
+        if matches!(bool_env("CAVE_DISABLE_ISOLATION"), Some(true)) {
+            isolation.enable_namespaces = false;
+            isolation.enable_cgroups = false;
+        }
+
+        if let Some(value) = bool_env("CAVE_DISABLE_NAMESPACES") {
+            if value {
+                isolation.enable_namespaces = false;
+            }
+        }
+
+        if let Some(value) = bool_env("CAVE_ENABLE_NAMESPACES") {
+            if value {
+                isolation.enable_namespaces = true;
+            }
+        }
+
+        if let Some(value) = bool_env("CAVE_DISABLE_CGROUPS") {
+            if value {
+                isolation.enable_cgroups = false;
+            }
+        }
+
+        if let Some(value) = bool_env("CAVE_ENABLE_CGROUPS") {
+            if value {
+                isolation.enable_cgroups = true;
+            }
+        }
+
+        if matches!(bool_env("CAVE_ISOLATION_NO_FALLBACK"), Some(true)) {
+            isolation.fallback_to_plain = false;
+        }
+
+        if let Ok(path) = env::var("CAVE_BWRAP_PATH") {
+            if !path.is_empty() {
+                isolation.bubblewrap_path = Some(PathBuf::from(path));
+            }
+        }
+
+        if let Ok(path) = env::var("CAVE_CGROUP_ROOT") {
+            if !path.is_empty() {
+                isolation.cgroup_root = Some(PathBuf::from(path));
+            }
+        }
+
         Ok(Self {
             listen_addr,
             db_url,
             workspace_root,
             default_runtime,
             default_limits,
+            isolation,
         })
     }
 }
@@ -530,6 +583,16 @@ fn mi_bytes(value: u64) -> u64 {
 
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
+}
+
+fn bool_env(key: &str) -> Option<bool> {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
 }
 
 #[cfg(test)]

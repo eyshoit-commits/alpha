@@ -9,7 +9,11 @@ use crate::ResourceLimits;
 
 /// Prepares a dedicated cgroup for the sandbox and applies basic limits.
 #[cfg(target_os = "linux")]
-pub async fn prepare_cgroup(root: &Path, sandbox_id: Uuid, limits: ResourceLimits) -> Result<PathBuf> {
+pub async fn prepare_cgroup(
+    root: &Path,
+    sandbox_id: Uuid,
+    limits: ResourceLimits,
+) -> Result<PathBuf> {
     let group_path = root.join(sandbox_id.to_string());
     fs::create_dir_all(&group_path)
         .await
@@ -43,7 +47,11 @@ pub async fn cleanup_cgroup(root: &Path, sandbox_id: Uuid) -> Result<()> {
 
 /// No-op implementations for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
-pub async fn prepare_cgroup(_root: &Path, _sandbox_id: Uuid, _limits: ResourceLimits) -> Result<PathBuf> {
+pub async fn prepare_cgroup(
+    _root: &Path,
+    _sandbox_id: Uuid,
+    _limits: ResourceLimits,
+) -> Result<PathBuf> {
     Err(anyhow::anyhow!("cgroups are only supported on Linux"))
 }
 
