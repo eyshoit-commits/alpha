@@ -477,17 +477,19 @@ impl ApiError {
 impl From<KernelError> for ApiError {
     fn from(err: KernelError) -> Self {
         match err {
-            KernelError::Sandbox(bkg_db::SandboxError::DuplicateSandbox(namespace, name)) => {
-                ApiError::new(
+            KernelError::Sandbox(inner) => match inner {
+                bkg_db::SandboxError::DuplicateSandbox(namespace, name) => ApiError::new(
                     StatusCode::CONFLICT,
                     format!(
                         "sandbox '{}' already exists in namespace '{}'",
                         name, namespace
                     ),
-                )
-            }
-            KernelError::Sandbox(bkg_db::SandboxError::NotFound(id))
-            | KernelError::NotFound(id) => {
+                ),
+                bkg_db::SandboxError::NotFound(id) => {
+                    ApiError::new(StatusCode::NOT_FOUND, format!("sandbox {} not found", id))
+                }
+            },
+            KernelError::NotFound(id) => {
                 ApiError::new(StatusCode::NOT_FOUND, format!("sandbox {} not found", id))
             }
             KernelError::AlreadyRunning(id) => ApiError::new(
@@ -500,7 +502,6 @@ impl From<KernelError> for ApiError {
             ),
             KernelError::Runtime(err) => ApiError::internal(err),
             KernelError::Storage(err) => ApiError::internal(err),
-            KernelError::Sandbox(err) => ApiError::internal(err),
             KernelError::Io(path, err) => {
                 ApiError::internal(format!("{} ({})", path.display(), err))
             }
