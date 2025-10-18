@@ -53,8 +53,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
 - [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
   Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/main.rs:48`); OTEL-Exporter & Monitoring fehlen weiterhin.
-- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.
-  Status: Kernel schreibt Lifecycle- und Exec-Events über den neuen `AuditLogWriter` als signierte JSONL-Datei (`crates/cave-kernel/src/audit.rs:1`, `crates/cave-kernel/src/lib.rs:120`); Integritätsprüfung, Rotation und Versand an zentrale Stores stehen aus.
+- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
+  Status: Keine Audit-Log-Writer implementiert.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
   Status: ProcessSandboxRuntime nutzt optional Bubblewrap, Seccomp/hardening fehlen (`crates/cave-kernel/src/lib.rs:425`).
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  
