@@ -11,6 +11,7 @@ import {
   sharedApiClient,
 } from "@shared/api";
 import { useToken } from "@/components/token-context";
+import { Button, Input, Select, Alert, Card } from "@/components/ui";
 
 interface KeyFormState {
   type: "admin" | "namespace";
@@ -23,7 +24,7 @@ export default function KeysPage() {
   const { token } = useToken();
   const client: ApiClient | null = useMemo(() => (token ? sharedApiClient.withToken(token) : null), [token]);
   const [keys, setKeys] = useState<KeyInfo[]>([]);
-  const [form, setForm] = useState<KeyFormState>({ type: "namespace", namespace: "default", rateLimit: 100, ttlHours: "" });
+  const [form, setForm] = useState<KeyFormState>({ type: "namespace", namespace: "default", rateLimit: 100, ttlHours: 24 });
   const [issuing, setIssuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issued, setIssued] = useState<IssuedKeyResponse | null>(null);
@@ -32,6 +33,23 @@ export default function KeysPage() {
   const [rotateKeyId, setRotateKeyId] = useState<string>("");
   const [rotateRateLimit, setRotateRateLimit] = useState<number | "">("");
   const [rotateTtlHours, setRotateTtlHours] = useState<number | "">("");
+
+  const rateLimitOptions = [
+    { value: "50", label: "50 req/min (Low)" },
+    { value: "100", label: "100 req/min (Standard)" },
+    { value: "200", label: "200 req/min (High)" },
+    { value: "500", label: "500 req/min (Premium)" },
+    { value: "1000", label: "1000 req/min (Enterprise)" },
+  ];
+
+  const ttlOptions = [
+    { value: "1", label: "1 hour" },
+    { value: "24", label: "1 day" },
+    { value: "168", label: "1 week" },
+    { value: "720", label: "30 days" },
+    { value: "8760", label: "1 year" },
+    { value: "", label: "Never expires" },
+  ];
 
   const loadKeys = useCallback(async () => {
     if (!client) return;
@@ -134,81 +152,62 @@ export default function KeysPage() {
   };
 
   return (
-    <section className="space-y-6">
-      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 className="text-xl font-semibold">Issue a new API key</h2>
-        <p className="mt-2 text-sm text-slate-600">
-          Admin keys can manage global resources while namespace keys are restricted to lifecycle operations for their
-          namespace. Keys are issued once and only the prefix is persisted server-side.
-        </p>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <label className="flex flex-col text-sm">
-            <span className="font-medium">Scope</span>
-            <select
-              value={form.type}
-              onChange={(event) => setForm((state) => ({ ...state, type: event.target.value as KeyFormState["type"] }))}
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-            >
-              <option value="namespace">Namespace</option>
-              <option value="admin">Admin</option>
-            </select>
-          </label>
+    <section className="space-y-8">
+      <Card
+        title="Issue a new API key"
+        description="Admin keys can manage global resources while namespace keys are restricted to lifecycle operations. Keys are issued once and only the prefix is persisted server-side."
+      >
+        <div className="grid gap-6 md:grid-cols-2">
+          <Select
+            label="Scope"
+            value={form.type}
+            onChange={(value) => setForm((state) => ({ ...state, type: value as KeyFormState["type"] }))}
+            options={[
+              { value: "namespace", label: "🔷 Namespace Scoped" },
+              { value: "admin", label: "👑 Admin (Full Access)" },
+            ]}
+          />
           {form.type === "namespace" && (
-            <label className="flex flex-col text-sm">
-              <span className="font-medium">Namespace</span>
-              <input
-                value={form.namespace}
-                onChange={(event) => setForm((state) => ({ ...state, namespace: event.target.value }))}
-                className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-              />
-            </label>
+            <Input
+              label="Namespace"
+              value={form.namespace}
+              onChange={(e) => setForm((state) => ({ ...state, namespace: e.target.value }))}
+              placeholder="e.g., default"
+            />
           )}
-          <label className="flex flex-col text-sm">
-            <span className="font-medium">Rate limit (req/min)</span>
-            <input
-              type="number"
-              value={form.rateLimit}
-              onChange={(event) => setForm((state) => ({ ...state, rateLimit: Number(event.target.value) }))}
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-            />
-          </label>
-          <label className="flex flex-col text-sm">
-            <span className="font-medium">TTL (hours)</span>
-            <input
-              type="number"
-              value={form.ttlHours}
-              onChange={(event) =>
-                setForm((state) => ({ ...state, ttlHours: event.target.value === "" ? "" : Number(event.target.value) }))
-              }
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-              placeholder="Leave blank for no expiry"
-            />
-          </label>
+          <Select
+            label="Rate Limit"
+            value={String(form.rateLimit)}
+            onChange={(value) => setForm((state) => ({ ...state, rateLimit: Number(value) }))}
+            options={rateLimitOptions}
+          />
+          <Select
+            label="Expiration"
+            value={String(form.ttlHours)}
+            onChange={(value) => setForm((state) => ({ ...state, ttlHours: value === "" ? "" : Number(value) }))}
+            options={ttlOptions}
+          />
         </div>
-        <div className="mt-4 flex gap-3">
-          <button
-            disabled={issuing}
-            onClick={handleIssue}
-            className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {issuing ? "Issuing…" : "Issue key"}
-          </button>
-          <button
-            onClick={loadKeys}
-            className="rounded-md border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm"
-          >
-            Refresh list
-          </button>
+        <div className="mt-6 flex gap-3">
+          <Button onClick={handleIssue} loading={issuing}>
+            {issuing ? "Creating..." : "🔑 Issue Key"}
+          </Button>
+          <Button variant="secondary" onClick={loadKeys}>
+            🔄 Refresh
+          </Button>
         </div>
-        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+        {error && (
+          <Alert variant="error" title="Error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
+        )}
         {issued && (
-          <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-            <p className="font-semibold">New token generated</p>
-            <p className="mt-2 break-all">
-              <span className="font-medium">Token:</span> {issued.token}
+          <Alert variant="success" title="✨ New Token Generated">
+            <p className="font-mono break-all bg-white p-3 rounded border-2 border-blue-200 mt-2">
+              {issued.token}
             </p>
-            <p className="mt-1 text-emerald-700">Copy this token now; it will not be shown again.</p>
-          </div>
+            <p className="mt-3 font-semibold">⚠️ Copy this token now - it won't be shown again!</p>
+          </Alert>
         )}
         {rotationResult && (
           <div className="mt-4 space-y-3 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
