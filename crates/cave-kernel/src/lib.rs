@@ -797,7 +797,6 @@ impl SandboxInstance for ProcessSandboxInstance {
 
         let overlay_mount = self.overlay.prepare().await?;
         let execution_root = overlay_mount.path().to_path_buf();
-        let _overlay_guard = overlay_mount;
 
         let mut command = if self.runtime.isolation.enable_namespaces {
             if let Some(bwrap) = self.runtime.bubblewrap_path.as_ref() {
@@ -842,17 +841,6 @@ impl SandboxInstance for ProcessSandboxInstance {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
-                if overlay_mounted {
-                    if let Some(dirs) = self.overlay.as_ref() {
-                        if let Err(unmount_err) = unmount_overlay(dirs) {
-                            warn!(
-                                sandbox = %self.sandbox_id,
-                                error = %unmount_err,
-                                "failed to unmount overlay after spawn error"
-                            );
-                        }
-                    }
-                }
                 return Err(err.into());
             }
         };
@@ -909,14 +897,6 @@ impl SandboxInstance for ProcessSandboxInstance {
                 })
             }
         };
-
-        if overlay_mounted {
-            if let Some(dirs) = self.overlay.as_ref() {
-                if let Err(err) = unmount_overlay(dirs) {
-                    warn!(sandbox = %self.sandbox_id, error = %err, "failed to unmount overlay");
-                }
-            }
-        }
 
         result
     }
