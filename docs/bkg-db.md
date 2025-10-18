@@ -16,7 +16,7 @@ Dieser Leitfaden definiert die vollständige Entwicklungsroadmap für **bkg-db**
 | Ebene | Funktion |
 | --- | --- |
 | **Kernel** | MVCC-Storage, Write-Ahead-Log (WAL), Checkpoints, Snapshot Isolation |
-| **SQL-Pipeline** | Parser → Planner → Executor (aktuell INSERT & SELECT * mit WHERE) |
+| **SQL-Pipeline** | Parser → Planner → Executor (aktuell INSERT, SELECT * mit WHERE, UPDATE & DELETE) |
 | **Auth/RLS** | JWT-basierte Authentifizierung, Row-Level-Security, persistente API-Keys |
 | **API-Layer** | PostgreSQL Wire-Protokoll, HTTP (REST), gRPC |
 | **Realtime/CDC** | WAL-basierte Subscriptions via WebSocket |

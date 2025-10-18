@@ -135,8 +135,9 @@ impl InMemoryTransaction {
     }
 
     /// Append a WAL entry that will be flushed on commit.
-    pub fn append_log(&mut self, entry: &[u8]) {
+    pub fn append_log(&mut self, entry: &[u8]) -> Result<()> {
         self.staged_log.push(entry.to_vec());
+        Ok(())
     }
 }
 
@@ -288,8 +289,8 @@ mod tests {
         let mut tx = engine
             .begin_transaction(TransactionMode::ReadWrite)
             .expect("begin tx");
-        tx.append_log(b"INSERT INTO foo VALUES (1)");
-        tx.append_log(b"INSERT INTO foo VALUES (2)");
+        tx.append_log(b"INSERT INTO foo VALUES (1)").unwrap();
+        tx.append_log(b"INSERT INTO foo VALUES (2)").unwrap();
         tx.commit().expect("commit");
 
         assert_eq!(engine.wal_entries(), 2);
@@ -301,7 +302,7 @@ mod tests {
         let mut tx = engine
             .begin_transaction(TransactionMode::ReadWrite)
             .expect("begin tx");
-        tx.append_log(b"UPDATE bar SET value = 42");
+        tx.append_log(b"UPDATE bar SET value = 42").unwrap();
         tx.rollback().expect("rollback");
 
         assert_eq!(engine.wal_entries(), 0);
@@ -317,7 +318,7 @@ mod tests {
             let mut tx = engine
                 .begin_transaction(TransactionMode::ReadWrite)
                 .expect("begin tx");
-            tx.append_log(b"UPSERT foo 1");
+            tx.append_log(b"UPSERT foo 1").unwrap();
             tx.commit().expect("commit");
             engine.checkpoint().expect("checkpoint");
             assert_eq!(engine.wal_entries(), 1);

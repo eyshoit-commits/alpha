@@ -4,7 +4,8 @@
 
 use anyhow::{anyhow, Result};
 use sqlparser::ast::{
-    BinaryOperator, Expr, ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor,
+    Assignment, BinaryOperator, Expr, FunctionArgExpr, ObjectName, Query, SelectItem, SetExpr,
+    Statement, TableFactor, TableWithJoins,
 };
 
 use crate::executor::ScalarValue;
@@ -24,13 +25,48 @@ pub enum LogicalPlan {
     Select {
         table: String,
         filter: Option<FilterExpr>,
+        aggregate: Option<AggregatePlan>,
+    },
+    Update {
+        table: String,
+        assignments: Vec<(String, ScalarValue)>,
+        filter: Option<FilterExpr>,
+    },
+    Delete {
+        table: String,
+        filter: Option<FilterExpr>,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct FilterExpr {
-    pub column: String,
-    pub value: ScalarValue,
+    pub kind: FilterKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum FilterKind {
+    Comparison {
+        column: String,
+        op: ComparisonOp,
+        value: ScalarValue,
+    },
+    And(Box<FilterExpr>, Box<FilterExpr>),
+    Or(Box<FilterExpr>, Box<FilterExpr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparisonOp {
+    Eq,
+    NotEq,
+    Gt,
+    Lt,
+    Gte,
+    Lte,
+}
+
+#[derive(Debug, Clone)]
+pub enum AggregatePlan {
+    CountStar,
 }
 
 /// Planner contract to create logical plans from SQL ASTs.
@@ -62,6 +98,15 @@ impl LogicalPlanner for PlannerDraft {
                 source,
                 ..
             } => build_insert_plan(table_name, columns, source),
+            Statement::Update {
+                table,
+                assignments,
+                selection,
+                ..
+            } => build_update_plan(table, assignments, selection.as_ref()),
+            Statement::Delete {
+                from, selection, ..
+            } => build_delete_plan(from, selection.as_ref()),
             Statement::Query(query) => build_select_plan(query),
             other => Err(anyhow!("statement not supported yet: {other:?}")),
         }
@@ -116,8 +161,12 @@ fn build_select_plan(query: &Query) -> Result<LogicalPlan> {
         _ => return Err(anyhow!("unsupported query body")),
     };
 
-    if select.projection.len() != 1 || !matches!(select.projection[0], SelectItem::Wildcard(_)) {
-        return Err(anyhow!("only SELECT * is supported"));
+    let aggregate = detect_aggregate(&select.projection)?;
+    if aggregate.is_none()
+        && (select.projection.len() != 1
+            || !matches!(select.projection[0], SelectItem::Wildcard(_)))
+    {
+        return Err(anyhow!("only SELECT * or SELECT COUNT(*) is supported"));
     }
 
     if select.from.len() != 1 {
@@ -135,7 +184,65 @@ fn build_select_plan(query: &Query) -> Result<LogicalPlan> {
         None
     };
 
-    Ok(LogicalPlan::Select { table, filter })
+    Ok(LogicalPlan::Select {
+        table,
+        filter,
+        aggregate,
+    })
+}
+
+fn build_update_plan(
+    table: &TableWithJoins,
+    assignments: &[Assignment],
+    selection: Option<&Expr>,
+) -> Result<LogicalPlan> {
+    let table_name = match &table.relation {
+        TableFactor::Table { name, .. } => name.to_string(),
+        _ => return Err(anyhow!("unsupported table factor in UPDATE")),
+    };
+
+    let mut parsed_assignments = Vec::new();
+    for assignment in assignments {
+        if assignment.id.len() != 1 {
+            return Err(anyhow!("multi-column assignments are not supported"));
+        }
+        let column = assignment.id[0].value.clone();
+        parsed_assignments.push((column, value_to_scalar(&assignment.value)?));
+    }
+
+    let filter = if let Some(expr) = selection {
+        parse_filter(expr)?
+    } else {
+        None
+    };
+
+    Ok(LogicalPlan::Update {
+        table: table_name,
+        assignments: parsed_assignments,
+        filter,
+    })
+}
+
+fn build_delete_plan(from: &[TableWithJoins], selection: Option<&Expr>) -> Result<LogicalPlan> {
+    if from.len() != 1 {
+        return Err(anyhow!("only single-table DELETE is supported"));
+    }
+
+    let table_name = match &from[0].relation {
+        TableFactor::Table { name, .. } => name.to_string(),
+        _ => return Err(anyhow!("unsupported table factor in DELETE")),
+    };
+
+    let filter = if let Some(expr) = selection {
+        parse_filter(expr)?
+    } else {
+        None
+    };
+
+    Ok(LogicalPlan::Delete {
+        table: table_name,
+        filter,
+    })
 }
 
 fn value_to_scalar(value: &Expr) -> Result<ScalarValue> {
@@ -160,16 +267,69 @@ fn value_to_scalar(value: &Expr) -> Result<ScalarValue> {
 
 fn parse_filter(expr: &Expr) -> Result<Option<FilterExpr>> {
     match expr {
-        Expr::BinaryOp { left, op, right } if matches!(op, BinaryOperator::Eq) => {
-            match (&**left, &**right) {
+        Expr::BinaryOp { left, op, right } => match op {
+            BinaryOperator::And => Ok(Some(FilterExpr {
+                kind: FilterKind::And(
+                    Box::new(parse_filter(left)?.ok_or_else(|| anyhow!("invalid filter"))?),
+                    Box::new(parse_filter(right)?.ok_or_else(|| anyhow!("invalid filter"))?),
+                ),
+            })),
+            BinaryOperator::Or => Ok(Some(FilterExpr {
+                kind: FilterKind::Or(
+                    Box::new(parse_filter(left)?.ok_or_else(|| anyhow!("invalid filter"))?),
+                    Box::new(parse_filter(right)?.ok_or_else(|| anyhow!("invalid filter"))?),
+                ),
+            })),
+            BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Gt
+            | BinaryOperator::Lt
+            | BinaryOperator::GtEq
+            | BinaryOperator::LtEq => match (&**left, &**right) {
                 (Expr::Identifier(ident), value) => Ok(Some(FilterExpr {
-                    column: ident.value.clone(),
-                    value: value_to_scalar(value)?,
+                    kind: FilterKind::Comparison {
+                        column: ident.value.clone(),
+                        op: map_operator(*op),
+                        value: value_to_scalar(value)?,
+                    },
                 })),
                 _ => Err(anyhow!("unsupported WHERE clause")),
+            },
+            _ => Err(anyhow!("only AND/OR with comparison filters are supported")),
+        },
+        _ => Err(anyhow!("unsupported WHERE clause")),
+    }
+}
+
+fn detect_aggregate(projection: &[SelectItem]) -> Result<Option<AggregatePlan>> {
+    if projection.len() != 1 {
+        return Ok(None);
+    }
+
+    match &projection[0] {
+        SelectItem::UnnamedExpr(Expr::Function(func)) => {
+            if func.name.0.len() == 1
+                && func.name.0[0].value.eq_ignore_ascii_case("count")
+                && func.args.len() == 1
+                && matches!(func.args[0], FunctionArgExpr::Wildcard)
+            {
+                Ok(Some(AggregatePlan::CountStar))
+            } else {
+                Err(anyhow!("unsupported aggregate function"))
             }
         }
-        Expr::BinaryOp { .. } => Err(anyhow!("only equality filters are supported")),
-        _ => Err(anyhow!("unsupported WHERE clause")),
+        _ => Ok(None),
+    }
+}
+
+fn map_operator(op: BinaryOperator) -> ComparisonOp {
+    match op {
+        BinaryOperator::Eq => ComparisonOp::Eq,
+        BinaryOperator::NotEq => ComparisonOp::NotEq,
+        BinaryOperator::Gt => ComparisonOp::Gt,
+        BinaryOperator::Lt => ComparisonOp::Lt,
+        BinaryOperator::GtEq => ComparisonOp::Gte,
+        BinaryOperator::LtEq => ComparisonOp::Lte,
+        _ => ComparisonOp::Eq,
     }
 }
