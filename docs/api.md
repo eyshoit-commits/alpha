@@ -9,7 +9,7 @@ Maintainer: @bkgoder
 ## Zweck
 Dieser Leitfaden dokumentiert die HTTP-Schnittstellen des `cave-daemon` (Sandbox-Lifecycle und API-Key-Verwaltung). Er ergänzt `README.md`, `docs/cli.md`, `docs/operations.md` und verweist auf die generierte OpenAPI-Spezifikation `../openapi.yaml`.
 
-Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/main.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
+Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/server.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
 
 ---
 
@@ -164,6 +164,8 @@ curl -X POST https://cave.example/api/v1/auth/keys \
 }
 ```
 
+Die zurückgegebenen `KeyInfo`-Objekte enthalten Metadaten zur Historie (`rotated_from`, `rotated_at`) sobald ein Schlüssel ersetzt wurde. Die Felder bleiben sonst `null`.
+
 ### GET `/api/v1/auth/keys`
 Listet alle bekannten Keys (Admin-Scope). Antwort: Array aus `KeyInfo` Objekten (`crates/cave-daemon/src/auth.rs`).
 
@@ -171,7 +173,7 @@ Listet alle bekannten Keys (Admin-Scope). Antwort: Array aus `KeyInfo` Objekten 
 Revokiert einen Key. Erfolgreich mit HTTP 204. `404` wenn ID unbekannt (`AuthService::revoke`).
 
 ### POST `/api/v1/auth/keys/rotate`
-Rotiert einen bestehenden Key, erstellt einen neuen Token und liefert Webhook-Metadaten zurück (`crates/cave-daemon/src/server.rs:768-798`).
+Ersetzt einen bestehenden Key durch ein neues Token. Admin-Scope erforderlich.
 
 ```bash
 curl -X POST https://cave.example/api/v1/auth/keys/rotate \
@@ -179,69 +181,66 @@ curl -X POST https://cave.example/api/v1/auth/keys/rotate \
   -H "Content-Type: application/json" \
   -d '{
         "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-        "rate_limit": 200
+        "rate_limit": 150,
+        "ttl_seconds": 604800
       }'
 ```
 
 **Antwort (200)**
 ```json
 {
-  "token": "bkg_admin_newtokenvalue",
+  "token": "bkg_demo_rotatedtoken",
   "info": {
-    "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
-    "scope": { "type": "admin" },
-    "rate_limit": 200,
-    "created_at": "2025-10-18T12:10:00Z",
-    "key_prefix": "bkg_admin_new",
+    "id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
+    "scope": { "type": "namespace", "namespace": "demo" },
+    "rate_limit": 150,
+    "created_at": "2025-10-18T12:30:00Z",
+    "last_used_at": null,
+    "expires_at": "2025-10-25T12:30:00Z",
+    "key_prefix": "bkg_demo_rot",
     "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-    "rotated_at": "2025-10-18T12:10:00Z"
+    "rotated_at": "2025-10-18T12:30:00Z"
   },
   "previous": {
     "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-    "scope": { "type": "admin" },
+    "scope": { "type": "namespace", "namespace": "demo" },
     "rate_limit": 100,
-    "created_at": "2025-09-01T08:00:00Z",
-    "last_used_at": "2025-10-18T11:59:59Z",
-    "key_prefix": "bkg_admin_old"
+    "created_at": "2025-09-10T09:00:00Z",
+    "last_used_at": "2025-10-18T12:29:58Z",
+    "expires_at": null,
+    "key_prefix": "bkg_demo_abcd",
+    "rotated_from": null,
+    "rotated_at": "2025-10-18T12:30:00Z"
   },
   "webhook": {
-    "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
-    "signature": "sha256=abc123...",
+    "event_id": "6b4dc7a8-1e5a-4cfa-a2e2-f9d4f2b1c90c",
+    "signature": "BASE64_HMAC",
     "payload": {
-      "event": "cave.auth.key.rotated",
-      "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+      "event": "key.rotated",
+      "key_id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
       "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-      "rotated_at": "2025-10-18T12:10:00Z",
-      "scope": { "type": "admin" },
-      "owner": "admin",
-      "key_prefix": "bkg_admin_new"
+      "rotated_at": "2025-10-18T12:30:00Z",
+      "scope": { "type": "namespace", "namespace": "demo" },
+      "owner": "demo",
+      "key_prefix": "bkg_demo_rot"
     }
   }
 }
 ```
 
-Fehler: `404` wenn der Key nicht existiert, `403` bei Namespace-Schlüsseln sowie `401` bei ungültigen Tokens oder Signaturen.
+Fehlerfälle:
+- `401` fehlender/ungültiger Token (`AuthError::InvalidToken`).
+- `403` Namespace-Keys dürfen nicht rotieren (`AuthError::Unauthorized`).
+- `404` unbekannte ID.
+- `503` wenn `CAVE_ROTATION_WEBHOOK_SECRET` fehlt (Webhook-Signatur nicht generierbar).
 
 ### POST `/api/v1/auth/keys/rotated`
-Validiert eine HMAC-signierte Webhook-Benachrichtigung nach einer Rotation (`crates/cave-daemon/src/server.rs:800-835`). Erwartet den Header `X-Cave-Webhook-Signature`.
+Validiert ein eingehendes Rotation-Webhook-Ereignis. Erwartet identische Payload wie im vorherigen Response und den Header `X-Cave-Webhook-Signature` (Base64-kodiertes HMAC-SHA256 mit `CAVE_ROTATION_WEBHOOK_SECRET`). Erfolgreich mit HTTP 204.
 
-```bash
-curl -X POST https://cave.example/api/v1/auth/keys/rotated \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "X-Cave-Webhook-Signature: sha256=abc123" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "event": "cave.auth.key.rotated",
-        "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
-        "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-        "rotated_at": "2025-10-18T12:10:00Z",
-        "scope": { "type": "admin" },
-        "owner": "admin",
-        "key_prefix": "bkg_admin_new"
-      }'
-```
-
-**Antwort (204)** – Kein Inhalt. Fehler: `401` bei fehlendem/ungültigem Header oder Signatur, `403` bei fehlendem Admin-Scope.
+Fehlerfälle:
+- `401` ohne Signatur-Header oder mit ungültigem Format (`ApiError::unauthorized`).
+- `401` bei Signatur-Mismatch (`AuthError::InvalidSignature`).
+- `403` wenn kein Admin-Scope.
 
 ---
 

@@ -1,5 +1,5 @@
 # Dockerfile for cave-daemon (Rust backend)
-FROM rust:1.75-slim as builder
+FROM rust:latest AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -36,8 +36,8 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/cave-daemon /app/cave-daemon
 
-# Copy config files if they exist
-COPY --chown=cave:cave config/ /app/config/ 2>/dev/null || true
+# Copy config files
+COPY --chown=cave:cave config/ /app/config/
 
 USER cave
 

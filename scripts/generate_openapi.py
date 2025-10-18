@@ -63,41 +63,54 @@ def issued_key_example() -> Dict[str, Any]:
             "last_used_at": None,
             "expires_at": "2025-11-17T12:00:00Z",
             "key_prefix": "bkg_demo_abcd",
+            "rotated_from": None,
+            "rotated_at": None,
         },
     }
 
 
 def rotation_webhook_payload_example() -> Dict[str, Any]:
     return {
-        "event": "cave.auth.key.rotated",
-        "key_id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
+        "event": "key.rotated",
+        "key_id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
         "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-        "rotated_at": "2025-10-18T12:10:00Z",
-        "scope": {"type": "admin"},
-        "owner": "admin",
-        "key_prefix": "bkg_admin_new",
+        "rotated_at": "2025-10-18T12:30:00Z",
+        "scope": {"type": "namespace", "namespace": "demo"},
+        "owner": "demo",
+        "key_prefix": "bkg_demo_rot",
     }
 
 
 def rotated_key_example() -> Dict[str, Any]:
-    previous = issued_key_example()["info"].copy()
-    current = {
-        "id": "a7d6b321-2c52-4e76-9af2-2f893d4856fc",
-        "scope": {"type": "admin"},
-        "rate_limit": 200,
-        "created_at": "2025-10-18T12:10:00Z",
-        "key_prefix": "bkg_admin_new",
-        "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
-        "rotated_at": "2025-10-18T12:10:00Z",
-    }
+    payload = rotation_webhook_payload_example()
     return {
-        "token": "bkg_admin_newtokenvalue",
-        "info": current,
-        "previous": previous,
+        "token": "bkg_demo_rotatedtoken",
+        "info": {
+            "id": payload["key_id"],
+            "scope": payload["scope"],
+            "rate_limit": 150,
+            "created_at": payload["rotated_at"],
+            "last_used_at": None,
+            "expires_at": "2025-10-25T12:30:00Z",
+            "key_prefix": payload["key_prefix"],
+            "rotated_from": payload["previous_key_id"],
+            "rotated_at": payload["rotated_at"],
+        },
+        "previous": {
+            "id": payload["previous_key_id"],
+            "scope": payload["scope"],
+            "rate_limit": 100,
+            "created_at": "2025-09-10T09:00:00Z",
+            "last_used_at": "2025-10-18T12:29:58Z",
+            "expires_at": None,
+            "key_prefix": "bkg_demo_abcd",
+            "rotated_from": None,
+            "rotated_at": payload["rotated_at"],
+        },
         "webhook": {
-            "event_id": "5b0c33d4-a1d8-4a1c-9844-3d955b1b4c6e",
-            "signature": "sha256=abc123...",
-            "payload": rotation_webhook_payload_example(),
+            "event_id": "6b4dc7a8-1e5a-4cfa-a2e2-f9d4f2b1c90c",
+            "signature": "BASE64_HMAC",
+            "payload": payload,
         },
     }
 
@@ -306,15 +319,7 @@ def build_spec() -> Dict[str, Any]:
                     "rotated_from": {"type": "string", "format": "uuid", "nullable": True},
                     "rotated_at": {"type": "string", "format": "date-time", "nullable": True},
                 },
-            },
-            "IssuedKeyResponse": {
-                "type": "object",
-                "required": ["token", "info"],
-                "properties": {
-                    "token": {"type": "string", "description": "Full bearer token. Shown once."},
-                    "info": {"$ref": "#/components/schemas/KeyInfo"},
-                },
-                "example": issued_key_example(),
+                "example": issued_key_example()["info"],
             },
             "RotateKeyRequest": {
                 "type": "object",
@@ -324,15 +329,21 @@ def build_spec() -> Dict[str, Any]:
                     "rate_limit": {
                         "type": "integer",
                         "format": "int32",
-                        "description": "Override rate limit for the rotated key (requests per minute).",
+                        "nullable": True,
+                        "description": "Optional override for the new key's rate limit.",
                     },
                     "ttl_seconds": {
                         "type": "integer",
                         "format": "int64",
+                        "nullable": True,
                         "description": "Optional TTL for the rotated key in seconds.",
                     },
                 },
-                "example": {"key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed", "rate_limit": 200},
+                "example": {
+                    "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                    "rate_limit": 150,
+                    "ttl_seconds": 604800,
+                },
             },
             "RotationWebhookPayload": {
                 "type": "object",
@@ -356,12 +367,12 @@ def build_spec() -> Dict[str, Any]:
                 },
                 "example": rotation_webhook_payload_example(),
             },
-            "RotationWebhookResponse": {
+            "RotationWebhookNotification": {
                 "type": "object",
                 "required": ["event_id", "signature", "payload"],
                 "properties": {
                     "event_id": {"type": "string", "format": "uuid"},
-                    "signature": {"type": "string"},
+                    "signature": {"type": "string", "description": "Base64 encoded HMAC signature."},
                     "payload": {"$ref": "#/components/schemas/RotationWebhookPayload"},
                 },
             },
@@ -372,9 +383,18 @@ def build_spec() -> Dict[str, Any]:
                     "token": {"type": "string"},
                     "info": {"$ref": "#/components/schemas/KeyInfo"},
                     "previous": {"$ref": "#/components/schemas/KeyInfo"},
-                    "webhook": {"$ref": "#/components/schemas/RotationWebhookResponse"},
+                    "webhook": {"$ref": "#/components/schemas/RotationWebhookNotification"},
                 },
                 "example": rotated_key_example(),
+            },
+            "IssuedKeyResponse": {
+                "type": "object",
+                "required": ["token", "info"],
+                "properties": {
+                    "token": {"type": "string", "description": "Full bearer token. Shown once."},
+                    "info": {"$ref": "#/components/schemas/KeyInfo"},
+                },
+                "example": issued_key_example(),
             },
         },
     }
@@ -399,6 +419,10 @@ def build_spec() -> Dict[str, Any]:
         "409": {
             "description": "Conflict",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}, "example": error_example("sandbox 'runner' already exists in namespace 'demo'")}},
+        },
+        "503": {
+            "description": "Service unavailable",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}, "example": error_example("rotation webhook secret is not configured")}},
         },
         "500": {
             "description": "Internal server error",
@@ -708,7 +732,7 @@ def build_spec() -> Dict[str, Any]:
                     },
                 },
                 "responses": {
-                    "201": {
+                    "200": {
                         "description": "API key issued",
                         "content": {
                             "application/json": {
@@ -763,7 +787,7 @@ def build_spec() -> Dict[str, Any]:
                 },
                 "responses": {
                     "200": {
-                        "description": "API key rotated",
+                        "description": "Key rotated",
                         "content": {
                             "application/json": {
                                 "schema": {"$ref": "#/components/schemas/RotatedKeyResponse"},
@@ -771,10 +795,10 @@ def build_spec() -> Dict[str, Any]:
                             }
                         },
                     },
-                    "400": responses["400"],
                     "401": responses["401"],
                     "403": responses["403"],
                     "404": responses["404"],
+                    "503": responses["503"],
                     "500": responses["500"],
                 },
             }
@@ -782,7 +806,7 @@ def build_spec() -> Dict[str, Any]:
         "/api/v1/auth/keys/rotated": {
             "post": {
                 "tags": ["Auth"],
-                "summary": "Verify a rotation webhook payload",
+                "summary": "Verify rotation webhook signature",
                 "operationId": "verifyRotationWebhook",
                 "security": [{"bearerAuth": []}],
                 "parameters": [
@@ -791,7 +815,7 @@ def build_spec() -> Dict[str, Any]:
                         "in": "header",
                         "required": True,
                         "schema": {"type": "string"},
-                        "description": "HMAC signature generated with CAVE_ROTATION_WEBHOOK_SECRET.",
+                        "description": "Base64 encoded HMAC-SHA256 signature of the payload.",
                     }
                 ],
                 "requestBody": {
@@ -804,7 +828,7 @@ def build_spec() -> Dict[str, Any]:
                     },
                 },
                 "responses": {
-                    "204": {"description": "Webhook accepted"},
+                    "204": {"description": "Signature accepted"},
                     "401": responses["401"],
                     "403": responses["403"],
                     "500": responses["500"],

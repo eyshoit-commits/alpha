@@ -1,10 +1,10 @@
 # Multi-stage Dockerfile for Next.js apps (admin & app)
 ARG APP_NAME=admin
 
-FROM node:20-slim as base
+FROM node:20-slim AS base
 
 # Install dependencies only when needed
-FROM base as deps
+FROM base AS deps
 ARG APP_NAME
 WORKDIR /app
 
@@ -13,7 +13,7 @@ COPY web/${APP_NAME}/package*.json ./
 RUN npm ci
 
 # Rebuild the source code only when needed
-FROM base as builder
+FROM base AS builder
 ARG APP_NAME
 WORKDIR /app
 
@@ -23,9 +23,6 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy app source
 COPY web/${APP_NAME} ./
 
-# Copy shared lib if it exists
-COPY web/lib ../lib 2>/dev/null || true
-
 # Set production env
 ENV NEXT_TELEMETRY_DISABLED 1
 ENV NODE_ENV production
@@ -34,7 +31,7 @@ ENV NODE_ENV production
 RUN npm run build
 
 # Production image
-FROM base as runner
+FROM base AS runner
 WORKDIR /app
 
 ARG APP_NAME
@@ -45,7 +42,6 @@ RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
 # Copy necessary files
-COPY --from=builder /app/public ./public 2>/dev/null || true
 COPY --from=builder /app/next.config.mjs ./
 
 # Copy built Next.js files

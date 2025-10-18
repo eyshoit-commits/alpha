@@ -206,14 +206,13 @@ export class ApiClient {
     });
   }
 
-  async acknowledgeRotation(
-    payload: RotationWebhookPayload,
-    signature: string,
-  ): Promise<void> {
+  async verifyRotationWebhook(payload: RotationWebhookPayload, signature: string): Promise<void> {
     await this.request<void>(`/api/v1/auth/keys/rotated`, {
       method: "POST",
       body: payload,
-      headers: { "X-Cave-Webhook-Signature": signature },
+      headers: {
+        "X-Cave-Webhook-Signature": signature,
+      },
     });
   }
 
@@ -229,11 +228,12 @@ export class ApiClient {
     const headers: Record<string, string> = {
       Accept: "application/json",
     };
-    if (options.headers) {
-      Object.assign(headers, options.headers);
-    }
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
+    }
+
+    if (options.headers) {
+      Object.assign(headers, options.headers);
     }
 
     let body: BodyInit | undefined;
