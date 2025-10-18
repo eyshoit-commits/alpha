@@ -90,9 +90,51 @@ jobs:
             echo "security/ directory missing; add tests to enable this step."
           fi
 
+  web-ui:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install workspace dependencies
+        working-directory: web
+        run: npm install
+
+      - name: Install Playwright browsers
+        working-directory: web
+        run: npx playwright install --with-deps
+
+      - name: Lint admin app
+        working-directory: web
+        run: npm run lint -w admin
+
+      - name: Lint namespace app
+        working-directory: web
+        run: npm run lint -w app
+
+      - name: Build admin app
+        working-directory: web/admin
+        run: npm run build
+
+      - name: Build namespace app
+        working-directory: web/app
+        run: npm run build
+
+      - name: Run Playwright tests
+        working-directory: web
+        env:
+          CI: "true"
+        run: npm run test:e2e
+
   supply-chain:
     runs-on: ubuntu-latest
-    needs: schema-and-security
+    needs: [schema-and-security, web-ui]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
