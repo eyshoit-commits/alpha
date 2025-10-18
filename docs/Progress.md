@@ -43,12 +43,14 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: `web-ui` Workflow-Job lintet/buildet beide Next.js-Apps und führt Playwright-Mocks der `/api/v1`-Flows aus (`.github/workflows/ci.yml`).
 - [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.
   Status: Workflow generiert SBOM/SLSA Placeholder + cosign Schritt (erfordert Schlüssel); Dokumentation in `docs/governance.md`.
-- [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.  
+- [x] SQLite-Migrationen für Test-Harness idempotent absichern.
+  Status: `Database::connect` toleriert doppelt ausgeführte Einträge in `_sqlx_migrations` (SQLite-Codes `1555`/`2067`), wodurch die Rotationstests grün laufen (`crates/bkg-db/src/lib.rs:65-76`, `crates/cave-daemon/src/main.rs:1025-1165`).
+- [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.
   Status: Testsuite nicht vorhanden.
 
 ## Governance & Betrieb
-- [ ] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).  
-  Status: AuthService unterstützt Issue/List/Revoke, Rotation/Webhooks fehlen (`crates/cave-daemon/src/auth.rs:68`).
+- [x] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).
+  Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/main.rs:147-210`, `crates/cave-daemon/src/auth.rs:57-310`, `crates/bkg-db/src/lib.rs:90-220`).
 - [ ] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.  
   Status: AuthService hält Keys nur im Speicher (`crates/cave-daemon/src/auth.rs:52`). Datenmodell & Migration in `bkg_db` anlegen.
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
