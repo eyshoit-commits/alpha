@@ -33,7 +33,7 @@ use serde_json::Value;
 use sqlx::{
     any::{AnyPoolOptions, AnyRow},
     migrate::MigrateError,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     AnyPool, Row, SqlitePool,
 };
 use thiserror::Error;
@@ -58,8 +58,7 @@ pub struct Database {
 }
 
 impl Database {
-    /// Establishes (or creates) a connection pool to the SQLite database located at
-    /// the given URL (e.g. `sqlite:///var/lib/bkg/bkg.db`).
+    /// Establishes (or creates) a connection pool for the given database URL.
     pub async fn connect(database_url: &str) -> Result<Self> {
         static DRIVERS: Once = Once::new();
         DRIVERS.call_once(|| {
@@ -86,13 +85,17 @@ impl Database {
             .await?;
 
         // Run embedded migrations. The directory is resolved relative to this crate.
-        if let Err(err) = sqlx::migrate!("./migrations").run(&pool).await {
+        let migration_result = match driver {
+            DatabaseDriver::Sqlite => sqlx::migrate!("./migrations").run(&pool).await,
+            DatabaseDriver::Postgres => sqlx::migrate!("./migrations_postgres").run(&pool).await,
+        };
+        if let Err(err) = migration_result {
             match &err {
                 MigrateError::Execute(sqlx::Error::Database(db_err))
                     if db_err.message().contains("_sqlx_migrations")
                         && db_err
                             .code()
-                            .map(|code| code == "2067" || code == "1555")
+                            .map(|code| matches!(code.as_ref(), "2067" | "1555" | "23505"))
                             .unwrap_or(false) => {}
                 _ => return Err(err.into()),
             }
@@ -151,12 +154,14 @@ impl Database {
         let (scope_type, scope_namespace) = scope.columns();
         match self.driver {
             DatabaseDriver::Sqlite => {
-                sqlx::query(r#"
+                sqlx::query(
+                    r#"
                 INSERT INTO api_keys (
                     id, token_hash, token_prefix, scope_type, scope_namespace,
                     rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                "#)
+                "#,
+                )
                 .bind(id.to_string())
                 .bind(token_hash)
                 .bind(token_prefix)
@@ -171,12 +176,14 @@ impl Database {
                 .await?
             }
             DatabaseDriver::Postgres => {
-                sqlx::query(r#"
+                sqlx::query(
+                    r#"
                 INSERT INTO api_keys (
                     id, token_hash, token_prefix, scope_type, scope_namespace,
                     rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10)
-                "#)
+                "#,
+                )
                 .bind(encode_uuid(id))
                 .bind(token_hash)
                 .bind(token_prefix)
@@ -262,23 +269,46 @@ impl Database {
     ) -> Result<WebhookEventRecord> {
         let id = Uuid::new_v4();
         let created_at = Utc::now();
-        sqlx::query(
-            r#"
-            INSERT INTO key_rotation_events (
-                id, new_key_id, previous_key_id, rotated_at,
-                payload, signature, created_at, delivered
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(new_key_id.to_string())
-        .bind(previous_key_id.to_string())
-        .bind(rotated_at.to_rfc3339())
-        .bind(payload)
-        .bind(signature)
-        .bind(created_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
+        match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query(
+                    r#"
+                INSERT INTO key_rotation_events (
+                    id, new_key_id, previous_key_id, rotated_at,
+                    payload, signature, created_at, delivered
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                "#,
+                )
+                .bind(id.to_string())
+                .bind(new_key_id.to_string())
+                .bind(previous_key_id.to_string())
+                .bind(rotated_at.to_rfc3339())
+                .bind(payload)
+                .bind(signature)
+                .bind(created_at.to_rfc3339())
+                .execute(&self.pool)
+                .await?;
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(
+                    r#"
+                INSERT INTO key_rotation_events (
+                    id, new_key_id, previous_key_id, rotated_at,
+                    payload, signature, created_at, delivered
+                ) VALUES ($1, $2, $3, $4, CAST($5 AS JSONB), $6, $7, false)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(encode_uuid(new_key_id))
+                .bind(encode_uuid(previous_key_id))
+                .bind(encode_datetime(rotated_at))
+                .bind(payload)
+                .bind(signature)
+                .bind(encode_datetime(created_at))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
 
         let payload_value = serde_json::from_str(payload)?;
         Ok(WebhookEventRecord {
@@ -295,8 +325,25 @@ impl Database {
 
     /// Lists queued key-rotation webhook events.
     pub async fn list_key_rotation_events(&self) -> Result<Vec<WebhookEventRecord>> {
-        let mut rows = sqlx::query("SELECT * FROM key_rotation_events ORDER BY created_at DESC")
-            .fetch(&self.pool);
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM key_rotation_events ORDER BY created_at DESC",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                new_key_id::text AS new_key_id,
+                previous_key_id::text AS previous_key_id,
+                rotated_at::text AS rotated_at,
+                payload::text AS payload,
+                signature,
+                created_at::text AS created_at,
+                delivered
+            FROM key_rotation_events
+            ORDER BY created_at DESC
+            "#
+            }
+        };
+        let mut rows = sqlx::query(query).fetch(&self.pool);
 
         let mut out = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -994,7 +1041,7 @@ fn map_api_key(row: AnyRow) -> Result<ApiKeyRecord> {
     })
 }
 
-fn map_rotation_event(row: SqliteRow) -> Result<WebhookEventRecord> {
+fn map_rotation_event(row: AnyRow) -> Result<WebhookEventRecord> {
     let id: String = row.try_get("id")?;
     let new_key_id: String = row.try_get("new_key_id")?;
     let previous_key_id: String = row.try_get("previous_key_id")?;
@@ -1009,7 +1056,7 @@ fn map_rotation_event(row: SqliteRow) -> Result<WebhookEventRecord> {
             .context("failed to deserialize rotation webhook payload")?,
         signature: row.try_get("signature")?,
         created_at: parse_datetime(row.try_get("created_at")?)?,
-        delivered: row.try_get::<i64, _>("delivered")? != 0,
+        delivered: decode_bool(&row, "delivered")?,
     })
 }
 

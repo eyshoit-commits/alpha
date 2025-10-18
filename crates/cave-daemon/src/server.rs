@@ -112,13 +112,9 @@ impl AppConfig {
             .parse()
             .context("invalid CAVE_API_ADDR")?;
 
-        let db_url = match env::var("BKG_DB_DSN") {
-            Ok(url) => url,
-            Err(_) => {
-                let path = env::var("BKG_DB_PATH").unwrap_or_else(|_| "./bkg.db".to_string());
-                format!("sqlite://{}", path)
-            }
-        };
+        let db_url = env::var("BKG_DB_DSN")
+            .or_else(|_| env::var("DATABASE_URL"))
+            .context("BKG_DB_DSN or DATABASE_URL must be configured")?;
 
         let workspace_root = env::var("CAVE_WORKSPACE_ROOT")
             .map(PathBuf::from)

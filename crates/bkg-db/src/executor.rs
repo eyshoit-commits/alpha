@@ -617,6 +617,7 @@ mod tests {
     use crate::planner::{LogicalOptimizer, LogicalPlanner, PlannerDraft};
     use crate::rls::{InMemoryPolicyEngine, RlsPolicy};
     use crate::sql::{DefaultSqlParser, SqlParser};
+    use serde_json::json;
     use tempfile::tempdir;
 
     #[test]
@@ -785,5 +786,89 @@ mod tests {
         assert_eq!(rows.rows.len(), 1);
         assert_eq!(rows.rows[0][0], ScalarValue::Int64(1));
         assert_eq!(rows.rows[0][1], ScalarValue::String("beta".into()));
+    }
+
+    #[test]
+    fn rls_prevents_cross_namespace_access() {
+        let storage = InMemoryStorageEngine::new();
+        let ctx = ExecutionContext::new(storage);
+        let parser = DefaultSqlParser::new();
+        let planner = PlannerDraft::new();
+        let executor = DefaultQueryExecutor::new();
+        let engine = InMemoryPolicyEngine::new();
+
+        let policies = vec![RlsPolicy {
+            name: "namespace-scope".into(),
+            table: "projects".into(),
+            expression: json!({
+                "eq": { "column": "namespace", "claim": "scope" }
+            }),
+        }];
+
+        let alpha_claims = TokenClaims {
+            subject: "user-alpha".into(),
+            scope: "namespace:alpha".into(),
+            issued_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+
+        let insert_alpha = parser
+            .parse(
+                "INSERT INTO projects (id, namespace, name) VALUES (1, 'namespace:alpha', 'Alpha')",
+            )
+            .expect("parse alpha insert");
+        let insert_alpha_plan = planner
+            .optimize(planner.build_logical_plan(&insert_alpha).unwrap())
+            .unwrap();
+        let result = executor
+            .execute(&ctx, &insert_alpha_plan, &alpha_claims, &policies, &engine)
+            .expect("alpha insert allowed");
+        assert_eq!(result.rows_affected, 1);
+
+        let beta_claims = TokenClaims {
+            subject: "user-beta".into(),
+            scope: "namespace:beta".into(),
+            issued_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+
+        let insert_beta = parser
+            .parse(
+                "INSERT INTO projects (id, namespace, name) VALUES (2, 'namespace:beta', 'Beta')",
+            )
+            .expect("parse beta insert");
+        let insert_beta_plan = planner
+            .optimize(planner.build_logical_plan(&insert_beta).unwrap())
+            .unwrap();
+        let beta_result =
+            executor.execute(&ctx, &insert_beta_plan, &alpha_claims, &policies, &engine);
+        assert!(beta_result.is_err());
+
+        let select_ast = parser
+            .parse("SELECT * FROM projects")
+            .expect("parse select");
+        let select_plan = planner
+            .optimize(planner.build_logical_plan(&select_ast).unwrap())
+            .unwrap();
+        let alpha_rows = executor
+            .execute(&ctx, &select_plan, &alpha_claims, &policies, &engine)
+            .expect("alpha select");
+        assert_eq!(alpha_rows.rows.len(), 1);
+
+        let beta_rows = executor
+            .execute(&ctx, &select_plan, &beta_claims, &policies, &engine)
+            .expect("beta select");
+        assert!(beta_rows.rows.is_empty());
+
+        let update_beta = parser
+            .parse("UPDATE projects SET name = 'Nope' WHERE id = 1")
+            .expect("parse update");
+        let update_plan = planner
+            .optimize(planner.build_logical_plan(&update_beta).unwrap())
+            .unwrap();
+        let update_result = executor
+            .execute(&ctx, &update_plan, &beta_claims, &policies, &engine)
+            .expect("beta update");
+        assert_eq!(update_result.rows_affected, 0);
     }
 }
