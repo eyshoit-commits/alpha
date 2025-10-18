@@ -14,18 +14,18 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
   Status: Kern-API existiert, Isolation ist ein Prozess-Shim ohne Low-Level-Schutz & Integrationstests (`crates/cave-kernel/src/lib.rs:1`).
 - [ ] Persistente `bkg_db` mit Row-Level-Security betriebsbereit und angebunden.  
-  Status: SQLite-Backed Prototyp vorhanden, Postgres/RLS Umsetzung steht aus (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
+  Status: SQLite-Backed Prototyp speichert API-Keys und RLS-Policies inkl. WAL-Recovery (`crates/bkg-db/src/lib.rs:169`, `crates/bkg-db/src/executor.rs:44`); Postgres-Pool & Service-Wiring stehen weiterhin aus (`docs/architecture.md:16`).
 - [ ] Web-UI (admin & user) mit Minimalfunktionen live; Phasenabschluss dokumentiert.  
   Status: Noch keine Web-UI-Struktur im Repo (`docs/architecture.md:19`).
 
 > Hinweis: Ohne abgeschlossene Phase-0 keine Aktivierung von P2P, Distributed Inference, Marketplace oder Multi-Agent-Features.
 
 ## Dokumentation & Templates
-- [ ] `docs/security.md` erstellen inkl. Threat-Matrix und CI-Hinweis auf `pytest security/`.  
-  Status: Dokument fehlt vollständig.
-- [ ] Fehlende Pflichtdokumente ergänzen/aktualisieren:  
-  `docs/api.md`, `docs/cli.md`, `docs/deployment.md`, `docs/operations.md`, `docs/testing.md`, `docs/governance.md`, `docs/compatibility.md`.
-  Status: Bisher keine Dateien vorhanden.  
+- [x] `docs/security.md` erstellt (Threat-Matrix, CI-Hinweis auf `pytest security/`).  
+  Status: Erstfassung vorhanden; Tests & weitere Szenarien ergänzen.
+- [x] Fehlende Pflichtdokumente ergänzt:  
+  `docs/api.md`, `docs/cli.md`, `docs/deployment.md`, `docs/operations.md`, `docs/testing.md`, `docs/governance.md`, `docs/compatibility.md`.  
+  Status: Skeletons vorhanden, müssen inhaltlich ausgebaut werden (markiert in Backlog).
 - [x] `AGENTS.md` angelegt (zentrales Agenten-Playbook); Cross-Linking im Repo aktuell (`AGENTS.md:1`, `docs/architecture.md:11`, `PROMPT.md:63`).
 - [x] `docs/bkg-db.md` aktualisiert; enthält nun den vollständigen Supabase/BKG-DB Prompt & Roadmap (ersetzt `docs/PROMPT_BKG_DB.md`).
 - [x] `docs/roadmap.md` hinzugefügt (Phase-0 Roadmap & Priorisierung); bei Status-Updates als Referenz nutzen.
@@ -36,11 +36,11 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## CI, Tests & Artefakte
 - [ ] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.  
-  Status: Keine Build-Skripte vorhanden.
-- [ ] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).  
-  Status: Noch kein CI-Job eingerichtet.
+  Status: Workflow (`.github/workflows/ci.yml`) erstellt, `make api-schema` Schritt fehlt weiterhin.
+- [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).  
+  Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
 - [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.  
-  Status: Pipeline fehlt; keine Artefakt-Jobs vorhanden.
+  Status: Workflow generiert SBOM/SLSA Placeholder + cosign Schritt (erfordert Schlüssel); Dokumentation in `docs/governance.md`.
 - [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.  
   Status: Testsuite nicht vorhanden.
 
@@ -57,6 +57,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Keine Audit-Log-Writer implementiert.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
   Status: ProcessSandboxRuntime nutzt optional Bubblewrap, Seccomp/hardening fehlen (`crates/cave-kernel/src/lib.rs:425`).
+- [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  
+  Status: Werte synchronisiert; Governance-Team hat Freigabe erteilt.
 
 ## BKG-DB Voll-Stack Aufbau
 - [ ] Kernel & Storage: MVCC, WAL, Checkpoints, Crash-Recovery.  
@@ -74,7 +76,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] Objekt-Storage: Buckets, presigned URLs, Backend-Abstraktion.  
   Status: Nicht gestartet (`storage.rs` fehlt).
 - [ ] Admin-UI (`web/admin`): Next.js Dashboard mit Tabs *Overview · Policies · Users · Telemetry · Audit*.  
-  Status: Verzeichnis fehlt komplett.
+  Status: Stub (`web/admin/README.md`, `package.json`) vorhanden; echte Next.js Implementierung ausstehend.
 - [ ] Telemetry & Audit: OTEL-Export, cosign-signierte JSONL-Logs.  
   Status: Keine Module (`telemetry.rs`, `audit.rs`) vorhanden.
 - [ ] CI & Supply Chain: Make Targets (`lint`, `test`, `sbom`, `slsa`, `sign`, `api-validate`) und pipeline scripts.  

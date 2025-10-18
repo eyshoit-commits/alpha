@@ -28,19 +28,19 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 64,
-          "default": 1
+          "default": 2
         },
         "memory_mb": {
           "type": "integer",
           "minimum": 128,
           "maximum": 262144,
-          "default": 512
+          "default": 1024
         },
         "timeout_s": {
           "type": "integer",
           "minimum": 1,
           "maximum": 86400,
-          "default": 60
+          "default": 120
         },
         "image_pull_policy": {
           "type": "string",
@@ -89,7 +89,7 @@
             "type": "integer",
             "minimum": 10,
             "maximum": 1048576,
-            "default": 500,
+            "default": 1024,
             "description": "Workspace disk quota."
           },
           "start": {

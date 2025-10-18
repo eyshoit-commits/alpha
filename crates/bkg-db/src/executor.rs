@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::from_slice;
 
 use crate::kernel::{InMemoryStorageEngine, StorageEngine, StorageTransaction, TransactionMode};
 use crate::planner::{AggregatePlan, ComparisonOp, FilterExpr, FilterKind, LogicalPlan};
@@ -25,14 +25,93 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     pub fn new(storage: InMemoryStorageEngine) -> Self {
-        Self {
+        Self::try_new(storage).expect("failed to initialize ExecutionContext from WAL")
+    }
+
+    pub fn try_new(storage: InMemoryStorageEngine) -> Result<Self> {
+        let ctx = Self {
             storage,
             tables: Arc::new(RwLock::new(HashMap::new())),
-        }
+        };
+        ctx.replay_wal()?;
+        Ok(ctx)
     }
 
     pub fn wal_entries(&self) -> usize {
         self.storage.wal_entries()
+    }
+
+    /// Returns lightweight metadata describing the currently managed tables.
+    pub fn table_summaries(&self) -> Vec<TableSummary> {
+        let tables = self.tables.read();
+        tables
+            .iter()
+            .map(|(name, data)| TableSummary {
+                name: name.clone(),
+                columns: data.columns.clone(),
+                row_count: data.rows.len(),
+            })
+            .collect()
+    }
+
+    fn replay_wal(&self) -> Result<()> {
+        let records = self.storage.wal_records();
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let mut tables = self.tables.write();
+        tables.clear();
+
+        for raw in records {
+            let entry: WalEntry = from_slice(&raw)?;
+            let table_entry = tables
+                .entry(entry.table.clone())
+                .or_insert_with(TableData::default);
+
+            if table_entry.columns.is_empty() {
+                table_entry.columns = entry.columns.clone();
+            } else if table_entry.columns != entry.columns {
+                return Err(anyhow!(
+                    "wal replay mismatch: expected columns {:?}, got {:?}",
+                    table_entry.columns,
+                    entry.columns
+                ));
+            }
+
+            match entry.event {
+                WalEventKind::Insert => {
+                    let row = entry
+                        .row_after
+                        .ok_or_else(|| anyhow!("insert entry missing row_after"))?;
+                    table_entry.rows.push(row);
+                }
+                WalEventKind::Update => {
+                    let before = entry
+                        .row_before
+                        .ok_or_else(|| anyhow!("update entry missing row_before"))?;
+                    let after = entry
+                        .row_after
+                        .ok_or_else(|| anyhow!("update entry missing row_after"))?;
+                    let position = table_entry
+                        .rows
+                        .iter()
+                        .position(|row| row == &before)
+                        .ok_or_else(|| anyhow!("update entry row not found during replay"))?;
+                    table_entry.rows[position] = after;
+                }
+                WalEventKind::Delete => {
+                    let before = entry
+                        .row_before
+                        .ok_or_else(|| anyhow!("delete entry missing row_before"))?;
+                    if let Some(position) = table_entry.rows.iter().position(|row| row == &before) {
+                        table_entry.rows.remove(position);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -40,6 +119,66 @@ impl ExecutionContext {
 struct TableData {
     columns: Vec<String>,
     rows: Vec<Vec<ScalarValue>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableSummary {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub row_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum WalEventKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalEntry {
+    event: WalEventKind,
+    table: String,
+    columns: Vec<String>,
+    row_before: Option<Vec<ScalarValue>>,
+    row_after: Option<Vec<ScalarValue>>,
+}
+
+impl WalEntry {
+    fn insert(table: &str, columns: &[String], row_after: Vec<ScalarValue>) -> Self {
+        Self {
+            event: WalEventKind::Insert,
+            table: table.to_string(),
+            columns: columns.to_vec(),
+            row_before: None,
+            row_after: Some(row_after),
+        }
+    }
+
+    fn update(
+        table: &str,
+        columns: &[String],
+        before: Vec<ScalarValue>,
+        after: Vec<ScalarValue>,
+    ) -> Self {
+        Self {
+            event: WalEventKind::Update,
+            table: table.to_string(),
+            columns: columns.to_vec(),
+            row_before: Some(before),
+            row_after: Some(after),
+        }
+    }
+
+    fn delete(table: &str, columns: &[String], before: Vec<ScalarValue>) -> Self {
+        Self {
+            event: WalEventKind::Delete,
+            table: table.to_string(),
+            columns: columns.to_vec(),
+            row_before: Some(before),
+            row_after: None,
+        }
+    }
 }
 
 /// Placeholder execution result structure.
@@ -123,12 +262,8 @@ fn execute_insert(
                 return Err(anyhow!("row length does not match table schema"));
             }
             entry.rows.push(row.clone());
-            let payload = serde_json::to_vec(&json!({
-                "event": "insert",
-                "table": table,
-                "columns": entry.columns.clone(),
-                "values": row,
-            }))?;
+            let wal_entry = WalEntry::insert(table, &entry.columns, row.clone());
+            let payload = serde_json::to_vec(&wal_entry)?;
             tx.append_log(&payload)?;
         }
     }
@@ -201,16 +336,13 @@ fn execute_update(
     let mut affected = 0u64;
     for row in entry.rows.iter_mut() {
         if filter_matches(&prepared_filter, row)? {
+            let before = row.clone();
             for (idx, value) in &indexed_assignments {
                 row[*idx] = value.clone();
             }
-            let snapshot = row.clone();
-            let payload = serde_json::to_vec(&json!({
-                "event": "update",
-                "table": table,
-                "columns": entry.columns.clone(),
-                "values": snapshot,
-            }))?;
+            let after = row.clone();
+            let wal_entry = WalEntry::update(table, &entry.columns, before, after);
+            let payload = serde_json::to_vec(&wal_entry)?;
             tx.append_log(&payload)?;
             affected += 1;
         }
@@ -252,12 +384,8 @@ fn execute_delete(
     entry.rows = kept;
 
     for row in &removed {
-        let payload = serde_json::to_vec(&json!({
-            "event": "delete",
-            "table": table,
-            "columns": entry.columns.clone(),
-            "values": row,
-        }))?;
+        let wal_entry = WalEntry::delete(table, &entry.columns, row.clone());
+        let payload = serde_json::to_vec(&wal_entry)?;
         tx.append_log(&payload)?;
     }
 
@@ -499,5 +627,57 @@ mod tests {
         let storage_reload = InMemoryStorageEngine::with_file_wal(&wal_path).expect("storage");
         storage_reload.recover().expect("recover");
         assert_eq!(storage_reload.wal_entries(), 3);
+    }
+
+    #[test]
+    fn wal_replay_restores_rows() {
+        let dir = tempdir().expect("tempdir");
+        let wal_path = dir.path().join("restore.wal");
+        let storage = InMemoryStorageEngine::with_file_wal(&wal_path).expect("storage");
+        let ctx = ExecutionContext::new(storage.clone());
+        let parser = DefaultSqlParser::new();
+        let planner = PlannerDraft::new();
+        let executor = DefaultQueryExecutor::new();
+
+        // Insert a project row.
+        let insert_ast = parser
+            .parse("INSERT INTO projects (id, name) VALUES (1, 'alpha')")
+            .expect("parse insert");
+        let insert_plan = planner
+            .optimize(planner.build_logical_plan(&insert_ast).unwrap())
+            .unwrap();
+        executor
+            .execute(&ctx, &insert_plan)
+            .expect("execute insert");
+
+        // Update the row to ensure WAL captures before/after images.
+        let update_ast = parser
+            .parse("UPDATE projects SET name = 'beta' WHERE id = 1")
+            .expect("parse update");
+        let update_plan = planner
+            .optimize(planner.build_logical_plan(&update_ast).unwrap())
+            .unwrap();
+        executor
+            .execute(&ctx, &update_plan)
+            .expect("execute update");
+
+        drop(ctx);
+
+        let storage_reload = InMemoryStorageEngine::with_file_wal(&wal_path).expect("storage");
+        storage_reload.recover().expect("recover");
+        let ctx_reload = ExecutionContext::try_new(storage_reload.clone()).expect("ctx");
+
+        let select_ast = parser
+            .parse("SELECT * FROM projects")
+            .expect("parse select");
+        let select_plan = planner
+            .optimize(planner.build_logical_plan(&select_ast).unwrap())
+            .unwrap();
+        let rows = executor
+            .execute(&ctx_reload, &select_plan)
+            .expect("execute select");
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(rows.rows[0][0], ScalarValue::Int64(1));
+        assert_eq!(rows.rows[0][1], ScalarValue::String("beta".into()));
     }
 }

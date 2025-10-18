@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
     Row, SqlitePool,
@@ -163,6 +164,126 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Creates or updates an RLS policy identified by (table_name, policy_name).
+    pub async fn upsert_rls_policy(&self, policy: NewRlsPolicy) -> Result<RlsPolicyRecord> {
+        if let Some(existing) = self
+            .fetch_rls_policy_by_name(&policy.table_name, &policy.policy_name)
+            .await?
+        {
+            let updated_at = Utc::now().to_rfc3339();
+            sqlx::query(
+                r#"
+                UPDATE rls_policies
+                SET expression = ?, updated_at = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(serde_json::to_string(&policy.expression)?)
+            .bind(&updated_at)
+            .bind(existing.id.to_string())
+            .execute(&self.pool)
+            .await?;
+
+            self.fetch_rls_policy(existing.id).await?.ok_or_else(|| {
+                anyhow!(
+                    "rls policy updated but missing when reloaded ({})",
+                    existing.id
+                )
+            })
+        } else {
+            let id = Uuid::new_v4();
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                r#"
+                INSERT INTO rls_policies (
+                    id, table_name, policy_name, expression, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(id.to_string())
+            .bind(&policy.table_name)
+            .bind(&policy.policy_name)
+            .bind(serde_json::to_string(&policy.expression)?)
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+
+            self.fetch_rls_policy(id)
+                .await?
+                .ok_or_else(|| anyhow!("rls policy inserted but missing when reloaded ({id})"))
+        }
+    }
+
+    /// Fetches a persisted RLS policy by identifier.
+    pub async fn fetch_rls_policy(&self, id: Uuid) -> Result<Option<RlsPolicyRecord>> {
+        let row = sqlx::query("SELECT * FROM rls_policies WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(map_rls_policy).transpose()
+    }
+
+    /// Lists stored RLS policies optionally filtered by table name.
+    pub async fn list_rls_policies(
+        &self,
+        table_name: Option<&str>,
+    ) -> Result<Vec<RlsPolicyRecord>> {
+        let mut rows = match table_name {
+            Some(table) => sqlx::query(
+                r#"
+                SELECT * FROM rls_policies
+                WHERE table_name = ?
+                ORDER BY policy_name ASC
+                "#,
+            )
+            .bind(table)
+            .fetch(&self.pool),
+            None => sqlx::query(
+                r#"
+                SELECT * FROM rls_policies
+                ORDER BY table_name ASC, policy_name ASC
+                "#,
+            )
+            .fetch(&self.pool),
+        };
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_rls_policy(row)?);
+        }
+        Ok(out)
+    }
+
+    /// Removes a stored RLS policy.
+    pub async fn delete_rls_policy(&self, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM rls_policies WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn fetch_rls_policy_by_name(
+        &self,
+        table_name: &str,
+        policy_name: &str,
+    ) -> Result<Option<RlsPolicyRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM rls_policies
+            WHERE table_name = ? AND policy_name = ?
+            "#,
+        )
+        .bind(table_name)
+        .bind(policy_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(map_rls_policy).transpose()
     }
 
     /// Registers a new sandbox in the catalog and returns the persisted record.
@@ -383,6 +504,20 @@ fn map_sandbox(row: SqliteRow) -> Result<SandboxRecord> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::ResourceLimits;
+
+    #[test]
+    fn resource_limits_default_match_policy() {
+        let limits = ResourceLimits::default();
+        assert_eq!(limits.cpu_limit_millis, 2_000);
+        assert_eq!(limits.memory_limit_bytes, 1_024 * 1024 * 1024);
+        assert_eq!(limits.disk_limit_bytes, 1_024 * 1024 * 1024);
+        assert_eq!(limits.timeout_seconds, 120);
+    }
+}
+
 fn map_execution(row: SqliteRow) -> Result<ExecutionRecord> {
     let args_json: String = row.try_get("args")?;
     let timed_out: i32 = row.try_get("timed_out")?;
@@ -426,6 +561,21 @@ fn map_api_key(row: SqliteRow) -> Result<ApiKeyRecord> {
     })
 }
 
+fn map_rls_policy(row: SqliteRow) -> Result<RlsPolicyRecord> {
+    let id: String = row.try_get("id")?;
+    let expression_json: String = row.try_get("expression")?;
+
+    Ok(RlsPolicyRecord {
+        id: Uuid::parse_str(&id)?,
+        table_name: row.try_get("table_name")?,
+        policy_name: row.try_get("policy_name")?,
+        expression: serde_json::from_str(&expression_json)
+            .context("failed to deserialize RLS policy expression")?,
+        created_at: parse_datetime(row.try_get("created_at")?)?,
+        updated_at: parse_datetime(row.try_get("updated_at")?)?,
+    })
+}
+
 /// Errors returned by the database layer.
 #[derive(Debug, Error, Clone)]
 pub enum SandboxError {
@@ -448,10 +598,10 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            cpu_limit_millis: 1_000,
-            memory_limit_bytes: 512 * 1024 * 1024,
-            disk_limit_bytes: 500 * 1024 * 1024,
-            timeout_seconds: 60,
+            cpu_limit_millis: 2_000,
+            memory_limit_bytes: 1_024 * 1024 * 1024,
+            disk_limit_bytes: 1_024 * 1024 * 1024,
+            timeout_seconds: 120,
         }
     }
 }
@@ -570,6 +720,36 @@ pub struct ApiKeyRecord {
     pub revoked: bool,
 }
 
+/// Input payload when creating oder updating RLS policies.
+#[derive(Debug, Clone)]
+pub struct NewRlsPolicy {
+    pub table_name: String,
+    pub policy_name: String,
+    pub expression: Value,
+}
+
+/// Persisted RLS policy representation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RlsPolicyRecord {
+    pub id: Uuid,
+    pub table_name: String,
+    pub policy_name: String,
+    pub expression: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl RlsPolicyRecord {
+    /// Converts the persisted record into the in-memory engine format.
+    pub fn to_engine_policy(&self) -> crate::rls::RlsPolicy {
+        crate::rls::RlsPolicy {
+            name: self.policy_name.clone(),
+            table: self.table_name.clone(),
+            expression: self.expression.clone(),
+        }
+    }
+}
+
 /// High-level sandbox lifecycle statuses persisted in the DB (also used in API responses).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -658,6 +838,7 @@ impl WorkerRegistry {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use serde_json::json;
 
     const TEST_DB_URL: &str = "sqlite::memory:";
 
@@ -761,5 +942,58 @@ mod tests {
         let updated = db.fetch_api_key(record.id).await.unwrap().unwrap();
         assert!(updated.revoked);
         assert!(updated.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn rls_policy_persistence_roundtrip() {
+        let db = setup_db().await;
+        let expression = json!({
+            "eq": {
+                "column": "namespace",
+                "claim": "scope"
+            }
+        });
+
+        let created = db
+            .upsert_rls_policy(NewRlsPolicy {
+                table_name: "projects".into(),
+                policy_name: "namespace-scope".into(),
+                expression: expression.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.table_name, "projects");
+        assert_eq!(created.policy_name, "namespace-scope");
+        assert_eq!(created.expression, expression);
+
+        let updated_expr = json!({
+            "eq": {
+                "column": "owner",
+                "claim": "subject"
+            }
+        });
+
+        let updated = db
+            .upsert_rls_policy(NewRlsPolicy {
+                table_name: "projects".into(),
+                policy_name: "namespace-scope".into(),
+                expression: updated_expr.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.expression, updated_expr);
+        assert!(updated.updated_at >= created.updated_at);
+
+        let listed = db.list_rls_policies(Some("projects")).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].policy_name, "namespace-scope");
+
+        db.delete_rls_policy(updated.id).await.unwrap();
+
+        let empty = db.list_rls_policies(Some("projects")).await.unwrap();
+        assert!(empty.is_empty());
     }
 }

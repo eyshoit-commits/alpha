@@ -59,6 +59,7 @@ Dieses Dokument priorisiert die anstehenden Arbeiten für BKG mit Fokus auf den 
 - Rate-Limit Durchsetzung im Gateway (Admin 1000/min, Namespace 100/min, etc.).
 - Telemetrie (`CAVE_OTEL_SAMPLING_RATE`) in Services einbinden.
 - Seccomp/Namespace Hardening dokumentieren (Host-Anforderungen, Profile, Tests) und in Kernel-Roadmap aufnehmen.
+- Aktualisierte Sandbox-Defaultlimits (2 vCPU / 1 GiB RAM / 120 s / 1 GiB Disk) in Monitoring, Alerting & Governance-Playbooks hinterlegen.
 
 ### Dokumentation
 - Fehlende Pflichtdokumente erstellen (`docs/api.md`, `docs/cli.md`, `docs/security.md`, …).

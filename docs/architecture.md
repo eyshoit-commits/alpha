@@ -23,6 +23,7 @@ Kernkomponenten
 Design‑Prinzipien
 -----------------
 - Clean‑Room: Konzepte aus Inspirations‑Repos werden übernommen, Code aber neu implementiert.
+- Innovation Tracking: Jede externe Inspiration wird in `docs/FEATURE_ORIGINS.md` dokumentiert (Template verpflichtend).
 - Security‑by‑Default: seccomp, cgroups, AES‑256 at rest, mTLS intern.
 - Modularität: Plugin‑Architecture; Adapter‑Trait garantiert swappable inference backends.
 - Observability: OpenTelemetry, Prometheus Metriken, append‑only Audit Logs.

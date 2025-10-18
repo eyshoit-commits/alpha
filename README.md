@@ -187,10 +187,10 @@ Bootstrap & Betrieb:
 7. DEFAULT SANDBOX EXECUTION POLICY (SCHUTZ)
 -----------------------------------------------------------------------
 Sichere, konservative Defaults:
-- CPU: 1 vCPU  
-- Memory: 512 MiB  
-- Timeout: 60 s  
-- Disk (workspace): 500 MiB
+- CPU: 2 vCPU  
+- Memory: 1024 MiB  
+- Timeout: 120 s  
+- Disk (workspace): 1024 MiB
 
 Administratoren können overrides beantragen; alle overrides sind policy‑gated und auditiert.
 

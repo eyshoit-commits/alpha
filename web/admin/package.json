@@ -1,0 +1,10 @@
+{
+  "name": "bkg-admin-ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "echo \"TODO: bootstrap Next.js\" && exit 1",
+    "test": "echo \"TODO: add UI tests\" && exit 1",
+    "lint": "echo \"TODO: add lint step\" && exit 1"
+  }
+}

@@ -1,0 +1,111 @@
+name: BKG CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          override: true
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace
+
+  schema-and-security:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node (for ajv)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install ajv-cli
+        run: npm install -g ajv-cli
+
+      - name: Validate cave.yaml if present
+        run: |
+          if [ -f "cave.yaml" ]; then
+            ajv validate -s schema/cave.schema.json -d cave.yaml
+          else
+            echo "cave.yaml not found, skipping schema validation."
+          fi
+
+      - name: Security tests placeholder
+        run: |
+          if [ -d "security" ]; then
+            pip install -r security/requirements.txt
+            pytest security/
+          else
+            echo "security/ directory missing; add tests to enable this step."
+          fi
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    needs: schema-and-security
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install Syft (SBOM)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Install SLSA generator
+        uses: slsa-framework/slsa-github-generator/actions/installer@v1.10.0
+
+      - name: Generate SBOM
+        run: |
+          syft packages dir:. -o json > sbom.json
+
+      - name: Generate SLSA provenance (placeholder)
+        run: |
+          echo "TODO: invoke make slsa once implemented"
+
+      - name: Sign SBOM (key required)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          if [ -f "cosign.key" ]; then
+            cosign sign-blob sbom.json --key cosign.key --output-signature sbom.sig
+          else
+            echo "cosign.key not provided; supply via secrets and update workflow."
+            exit 1
+          fi

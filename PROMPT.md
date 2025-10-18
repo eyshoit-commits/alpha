@@ -34,7 +34,7 @@
 - API-Key abfragen (`export BKG_API_KEY=...`), kein `--dev` in Produktion.
 - Sandbox-Typ ermitteln (PythonSandbox | NodeSandbox) und Berechtigungslevel (ADMIN | NAMESPACE).
 - Ausführungsmodus festlegen: `bkg exe` (temporary) vs. `bkg init` → `bkg add` → `bkgr` (persistent).
-- Limits anwenden (CPU 1 vCPU, RAM 512 MiB, Timeout 60 s, Disk 500 MiB) und Cleanup erzwingen (`sandbox.stop()`).
+- Limits anwenden (CPU 2 vCPU, RAM 1024 MiB, Timeout 120 s, Disk 1024 MiB) und Cleanup erzwingen (`sandbox.stop()`).
 - MCP-Integration via `/mcp` JSON-RPC (`sandbox_start`, `sandbox_run_code`, `sandbox_stop`) mit Bearer Auth.
 - Ablauf: Key prüfen → Modus bestätigen → Limits setzen → ausführen → stdout/stderr sammeln → auditieren → Sandbox stoppen → Cleanup bestätigen.
 

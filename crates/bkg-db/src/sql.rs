@@ -45,6 +45,12 @@ impl DefaultSqlParser {
     }
 }
 
+impl Clone for DefaultSqlParser {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl SqlParser for DefaultSqlParser {
     fn parse(&self, sql: &str) -> Result<SqlAst> {
         let mut statements = Parser::parse_sql(&self.dialect, sql)

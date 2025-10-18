@@ -1,11 +1,11 @@
 # sandbox_config.toml – Konfiguration der Microsandbox-Ausführungsumgebung
 
 [limits]  
-cpu_vcpus = 1                  # Standard CPU-Limit pro Sandbox (1 vCPU):contentReference[oaicite:21]{index=21}  
-memory_mib = 512               # Standard RAM-Limit (512 MiB)  
-timeout_sec = 60               # Standard Laufzeit-Timeout für Code (60 Sekunden)  
-disk_mib = 500                 # Standard Dateisystem-Speicherlimit (500 MiB)  
-allow_override = false         # Ressourcenlimits dürfen nur nach expliziter Genehmigung erhöht werden (Overrides via Orchestrator):contentReference[oaicite:22]{index=22}
+cpu_vcpus = 2                  # Standard CPU-Limit pro Sandbox (erhöht auf 2 vCPU für mehr Parallelität)  
+memory_mib = 1024              # Standard RAM-Limit (1 GiB)  
+timeout_sec = 120              # Standard Laufzeit-Timeout (120 Sekunden)  
+disk_mib = 1024                # Standard Dateisystem-Speicherlimit (1 GiB)  
+allow_override = true          # Ressourcenlimits können nach Freigabe durch den Orchestrator überschrieben werden
 
 [runtime]  
 allowed_runtimes = ["python", "nodejs"]    # Erlaubte Sandbox-Sprachen/Umgebungen  

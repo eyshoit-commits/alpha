@@ -177,7 +177,8 @@ Diese Targets sind Mindestanforderung; ergänze Scripte/Workflows je nach CI-Anb
 6. **Objekt-Storage** – Bucket Verwaltung, presigned URLs, Backend-Abstraktion.  
 7. **Admin-UI** – Next.js App (Overview, Policies, Users, Telemetry, Audit).  
 8. **Telemetry & Audit** – OTEL Export, cosign-signierte Logs mit Rotation.  
-9. **CI & Supply Chain** – Implementierte Make Targets, SBOM/SLSA, cosign Signierung, OpenAPI-Checks.
+9. **CI & Supply Chain** – Implementierte Make Targets, SBOM/SLSA, cosign Signierung, OpenAPI-Checks.  
+10. **Postgres Migration** – Umsetzung des Stufenplans in `docs/governance.md` (§3) inkl. Dual-Write Phase und Cutover.
 
 Der Fortschritt wird kontinuierlich in `docs/Progress.md` (Status) und `docs/roadmap.md` (Planung) gespiegelt.
 

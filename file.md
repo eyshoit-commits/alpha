@@ -26,11 +26,25 @@
 │   ├── env.md
 │   ├── FEATURE_ORIGINS.md
 │   ├── Progress.md
-│   └── roadmap.md
+│   ├── roadmap.md
+│   ├── api.md
+│   ├── cli.md
+│   ├── deployment.md
+│   ├── governance.md
+│   ├── operations.md
+│   ├── security.md
+│   ├── testing.md
+│   └── compatibility.md
 ├── schema/
 │   └── cave.schema.json
-└── .codex/
-    └── codex_config.toml
+├── web/
+│   └── admin/
+│       ├── README.md
+│       └── package.json
+├── .codex/
+│   └── codex_config.toml
+└── .github/workflows/
+    └── ci.yml
 ```
 
 > Vollständige Listings können bei Bedarf mit `find . -print | sort` erzeugt werden (Achtung: erzeugt sehr lange Ausgaben).
