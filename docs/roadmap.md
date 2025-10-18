@@ -53,7 +53,7 @@ Dieses Dokument priorisiert die anstehenden Arbeiten für BKG mit Fokus auf den 
 ### CI & Automatisierung
 - `make api-schema`, `openapi-cli validate`, `ajv validate` in CI integrieren.
 - SBOM/SLSA Pipeline (`make sbom`, `make slsa`, `cosign sign-blob`) aufsetzen.
-- `pytest security/` für Threat-Matrix Validierung hinzufügen.
+- `pytest tests/security/` für Threat-Matrix Validierung hinzufügen.
 
 ### Governance & Sicherheit
 - Schlüsselrotation + Webhook (`/api/v1/auth/keys/rotated`) implementieren.

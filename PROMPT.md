@@ -57,7 +57,7 @@
 ## Release, Tests & Artefakte
 - Builds generieren `openapi.yaml` via `make api-schema`; in CI `openapi-cli validate openapi.yaml`.
 - CI Jobs: `ajv validate -s schema/cave.schema.json -d cave.yaml`, `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`.
-- Threat-Matrix aus `docs/security.md` wird via `pytest security/` geprüft.
+- Threat-Matrix aus `docs/security.md` wird via `pytest tests/security/` geprüft.
 - Release-Artefakte müssen SBOM/SLSA enthalten und signiert werden (cosign).
 
 ## Dokumentation & Templates

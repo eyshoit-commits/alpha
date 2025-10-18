@@ -13,7 +13,7 @@ Maintainer: @bkgoder
   - Daemon API (`crates/cave-daemon/tests`).  
   - bkg-db SQL/RLS (`cargo test -p bkg-db`).  
 - **End-to-End Tests**: Web-UIs (Playwright/Cypress), CLI Szenarien.  
-- **Security Tests**: `pytest security/` (Threat Matrix).  
+- **Security Tests**: `pytest tests/security/` (Threat Matrix).
 - **Load Tests**: k6/Gatling (Backlog).
 
 ---
@@ -23,16 +23,18 @@ Maintainer: @bkgoder
 - `cargo test --workspace` (Unit/Integration).  
 - `SQLX_OFFLINE=true sqlx migrate run` (Migration Tests).  
 - `npm test` (UI, sobald vorhanden).  
-- `pytest security/` (Security Suite).  
+- `pytest tests/security/` (Security Suite).
 - `make sbom && make slsa && cosign sign-blob` (Supply Chain).
 
 ---
 
 ## CI Konfiguration
 Siehe `.github/workflows/ci.yml`:
-1. `lint-test` – fmt, clippy, cargo test.  
-2. `schema-and-security` – `ajv validate`, Security Tests (TODO).  
-3. `supply-chain` – SBOM, SLSA, cosign Signatur (Schlüssel über Secrets).
+1. `lint-test` – fmt, clippy, cargo test.
+2. `api-schema` – `make api-schema`, `openapi-cli validate`, optional `ajv` gegen `cave.yaml`.
+3. `security-tests` – `pytest tests/security/` für Threat-Matrix Verifikation.
+4. `web-ui` – Next.js Lint/Build + Playwright.
+5. `supply-chain` – `make sbom`, `make slsa`, optional cosign Signatur.
 
 ---
 
@@ -45,7 +47,7 @@ Siehe `.github/workflows/ci.yml`:
 ---
 
 ## Backlog
-- [ ] Security Test Suite implementieren (`security/`).  
+- [x] Security Test Suite implementieren (`tests/security/`).
 - [ ] Integration Tests für Websocket Streaming.  
 - [ ] CLI Snapshot Tests (assert_cmd).  
 - [ ] Load/Stress Tests automatisieren (Nightly Pipeline).
