@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { blockchain, BlockchainAccount } from "@/lib/blockchain";
 import { Alert } from "@/components/ui/alert";
+import { WalletConnectModal } from "@/components/wallet-connect-modal";
 
 interface Transaction {
   id: string;
@@ -136,6 +137,7 @@ export default function WalletPage() {
       <Card
         title="💰 bKG Wallet"
         description="Manage your bKG tokens and blockchain transactions"
+        actions={account && <WalletConnectModal account={account} />}
       >
         {error && <Alert variant="error" message={error} />}
         {success && <Alert variant="success" message={success} />}
