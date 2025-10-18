@@ -8,7 +8,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
 - Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
-- Governance-Themen wie Rotations-Webhook, Audit-Log-Streaming und Telemetrie-Policy sind im Code bislang nicht implementiert (keine entsprechenden Module in `crates/cave-daemon` sichtbar).
+- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
@@ -51,10 +51,10 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: AuthService hält Keys nur im Speicher (`crates/cave-daemon/src/auth.rs:52`). Datenmodell & Migration in `bkg_db` anlegen.
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
-- [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.  
-  Status: Tracing initialisiert, OTEL/Sampling-Anbindung fehlt (`crates/cave-daemon/src/main.rs:61`).
-- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
-  Status: Keine Audit-Log-Writer implementiert.
+- [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
+  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/main.rs:48`); OTEL-Exporter & Monitoring fehlen weiterhin.
+- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.
+  Status: Kernel schreibt Lifecycle- und Exec-Events über den neuen `AuditLogWriter` als signierte JSONL-Datei (`crates/cave-kernel/src/audit.rs:1`, `crates/cave-kernel/src/lib.rs:120`); Integritätsprüfung, Rotation und Versand an zentrale Stores stehen aus.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
   Status: ProcessSandboxRuntime nutzt optional Bubblewrap, Seccomp/hardening fehlen (`crates/cave-kernel/src/lib.rs:425`).
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  

@@ -11,15 +11,19 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bkg_db::{Database, ExecutionRecord, ResourceLimits, SandboxRecord};
 use cave_kernel::{
-    CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings, KernelConfig,
-    KernelError, ProcessSandboxRuntime,
+    AuditConfig, CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings,
+    KernelConfig, KernelError, ProcessSandboxRuntime,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing::{error, info, warn};
+use tracing_subscriber::{
+    filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+};
 use uuid::Uuid;
 
 #[tokio::main]
@@ -32,11 +36,13 @@ async fn main() -> Result<()> {
         .await
         .context("failed to open database")?;
 
-    let mut kernel_cfg = KernelConfig::default();
-    kernel_cfg.workspace_root = config.workspace_root.clone();
-    kernel_cfg.default_runtime = config.default_runtime.clone();
-    kernel_cfg.default_limits = config.default_limits;
-    kernel_cfg.isolation = config.isolation.clone();
+    let kernel_cfg = KernelConfig {
+        workspace_root: config.workspace_root.clone(),
+        default_runtime: config.default_runtime.clone(),
+        default_limits: config.default_limits,
+        isolation: config.isolation.clone(),
+        audit: config.audit.clone(),
+    };
 
     let runtime = ProcessSandboxRuntime::new(kernel_cfg.isolation.clone())
         .context("initializing sandbox runtime")?;
@@ -60,10 +66,78 @@ async fn main() -> Result<()> {
 
 fn initialize_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let (sampling_rate, warning) = read_sampling_rate();
+
+    if sampling_rate >= 1.0 {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    } else {
+        let rate = sampling_rate;
+        let sampling_filter = filter_fn(move |metadata| {
+            if metadata.is_event() {
+                rand::thread_rng().gen_bool(rate)
+            } else {
+                true
+            }
+        });
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_filter(sampling_filter))
+            .init();
+    }
+
+    if let Some(message) = warning {
+        warn!("{message}");
+    }
+
+    info!(sampling_rate, "telemetry sampling configured");
+}
+
+fn read_sampling_rate() -> (f64, Option<String>) {
+    let raw = env::var("CAVE_OTEL_SAMPLING_RATE").ok();
+    parse_sampling_rate(raw.as_deref())
+}
+
+fn parse_sampling_rate(raw: Option<&str>) -> (f64, Option<String>) {
+    match raw {
+        None => (1.0, None),
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return (
+                    1.0,
+                    Some("CAVE_OTEL_SAMPLING_RATE is empty; defaulting to 1.0".to_string()),
+                );
+            }
+
+            match trimmed.parse::<f64>() {
+                Ok(parsed) => {
+                    if (0.0..=1.0).contains(&parsed) {
+                        (parsed, None)
+                    } else {
+                        let clamped = parsed.clamp(0.0, 1.0);
+                        (
+                            clamped,
+                            Some(format!(
+                                "CAVE_OTEL_SAMPLING_RATE={} outside 0.0..=1.0; clamped to {}",
+                                trimmed, clamped
+                            )),
+                        )
+                    }
+                }
+                Err(_) => (
+                    1.0,
+                    Some(format!(
+                        "CAVE_OTEL_SAMPLING_RATE='{}' is not a valid float; defaulting to 1.0",
+                        trimmed
+                    )),
+                ),
+            }
+        }
+    }
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
@@ -100,6 +174,7 @@ struct AppConfig {
     default_runtime: String,
     default_limits: ResourceLimits,
     isolation: IsolationSettings,
+    audit: AuditConfig,
 }
 
 impl AppConfig {
@@ -192,6 +267,34 @@ impl AppConfig {
             }
         }
 
+        let audit_enabled = match bool_env("CAVE_AUDIT_LOG_ENABLED") {
+            Some(value) => value,
+            None => !matches!(bool_env("CAVE_AUDIT_LOG_DISABLED"), Some(true)),
+        };
+        let audit_log_path = env::var("CAVE_AUDIT_LOG_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./logs/audit.jsonl"));
+        let audit_hmac_key = match env::var("CAVE_AUDIT_LOG_HMAC_KEY") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        STANDARD
+                            .decode(trimmed)
+                            .context("invalid base64 in CAVE_AUDIT_LOG_HMAC_KEY")?,
+                    )
+                }
+            }
+            Err(_) => None,
+        };
+        let audit = AuditConfig {
+            enabled: audit_enabled,
+            log_path: audit_log_path,
+            hmac_key: audit_hmac_key,
+        };
+
         Ok(Self {
             listen_addr,
             db_url,
@@ -199,6 +302,7 @@ impl AppConfig {
             default_runtime,
             default_limits,
             isolation,
+            audit,
         })
     }
 }
@@ -778,12 +882,12 @@ fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
 }
 
-fn require_bearer<'a>(headers: &'a HeaderMap) -> Result<&'a str, ApiError> {
+fn require_bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
     bearer_optional(headers)?
         .ok_or_else(|| ApiError::unauthorized("missing Authorization bearer token"))
 }
 
-fn bearer_optional<'a>(headers: &'a HeaderMap) -> Result<Option<&'a str>, ApiError> {
+fn bearer_optional(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
     if let Some(value) = headers.get(header::AUTHORIZATION) {
         let header_value = value
             .to_str()
@@ -829,5 +933,33 @@ mod tests {
         assert_eq!(converted.memory_limit_bytes, mi_bytes(1024));
         assert_eq!(converted.disk_limit_bytes, mi_bytes(1024));
         assert_eq!(converted.timeout_seconds, 90);
+    }
+
+    #[test]
+    fn parse_sampling_rate_defaults_to_one() {
+        let (rate, warning) = parse_sampling_rate(None);
+        assert_eq!(rate, 1.0);
+        assert!(warning.is_none());
+
+        let (rate, warning) = parse_sampling_rate(Some("not-a-number"));
+        assert_eq!(rate, 1.0);
+        assert!(warning
+            .unwrap()
+            .contains("CAVE_OTEL_SAMPLING_RATE='not-a-number'"));
+    }
+
+    #[test]
+    fn parse_sampling_rate_clamps_out_of_range() {
+        let (rate, warning) = parse_sampling_rate(Some("1.5"));
+        assert_eq!(rate, 1.0);
+        assert!(warning
+            .unwrap()
+            .contains("CAVE_OTEL_SAMPLING_RATE=1.5 outside"));
+
+        let (rate, warning) = parse_sampling_rate(Some("-0.3"));
+        assert_eq!(rate, 0.0);
+        assert!(warning
+            .unwrap()
+            .contains("CAVE_OTEL_SAMPLING_RATE=-0.3 outside"));
     }
 }

@@ -339,7 +339,7 @@ impl Database {
             .fetch_optional(&self.pool)
             .await?;
 
-        row.map(|row| map_sandbox(row)).transpose()
+        row.map(map_sandbox).transpose()
     }
 
     /// Lists all sandboxes within a namespace ordered by creation time descending.
