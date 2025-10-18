@@ -50,13 +50,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
       - name: Install Node (for ajv)
         uses: actions/setup-node@v4
         with:
           node-version: "18"
 
-      - name: Install ajv-cli
-        run: npm install -g ajv-cli
+      - name: Install schema tooling
+        run: npm install -g ajv-cli @redocly/openapi-cli
+
+      - name: Generate OpenAPI schema
+        run: make api-schema
+
+      - name: Ensure OpenAPI schema committed
+        run: git diff --exit-code -- openapi.yaml
+
+      - name: Validate OpenAPI schema
+        run: openapi-cli validate openapi.yaml
 
       - name: Validate cave.yaml if present
         run: |
@@ -75,9 +90,51 @@ jobs:
             echo "security/ directory missing; add tests to enable this step."
           fi
 
+  web-ui:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install workspace dependencies
+        working-directory: web
+        run: npm install
+
+      - name: Install Playwright browsers
+        working-directory: web
+        run: npx playwright install --with-deps
+
+      - name: Lint admin app
+        working-directory: web
+        run: npm run lint -w admin
+
+      - name: Lint namespace app
+        working-directory: web
+        run: npm run lint -w app
+
+      - name: Build admin app
+        working-directory: web/admin
+        run: npm run build
+
+      - name: Build namespace app
+        working-directory: web/app
+        run: npm run build
+
+      - name: Run Playwright tests
+        working-directory: web
+        env:
+          CI: "true"
+        run: npm run test:e2e
+
   supply-chain:
     runs-on: ubuntu-latest
-    needs: schema-and-security
+    needs: [schema-and-security, web-ui]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,13 +156,17 @@ jobs:
         run: |
           echo "TODO: invoke make slsa once implemented"
 
-      - name: Sign SBOM (key required)
+      - name: Sign SBOM when key is provided
         env:
           COSIGN_EXPERIMENTAL: "1"
+          COSIGN_KEY_B64: ${{ secrets.COSIGN_KEY_B64 }}
         run: |
-          if [ -f "cosign.key" ]; then
+          if [ -n "${COSIGN_KEY_B64}" ]; then
+            echo "Using cosign key from secrets"
+            echo "${COSIGN_KEY_B64}" | base64 -d > cosign.key
+            cosign sign-blob sbom.json --key cosign.key --output-signature sbom.sig
+          elif [ -f "cosign.key" ]; then
             cosign sign-blob sbom.json --key cosign.key --output-signature sbom.sig
           else
-            echo "cosign.key not provided; supply via secrets and update workflow."
-            exit 1
+            echo "Skipping cosign signing; provide COSIGN_KEY_B64 secret or cosign.key artifact to enable signing."
           fi

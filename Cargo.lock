@@ -252,7 +252,6 @@ dependencies = [
  "bkg-db",
  "chrono",
  "hmac",
- "libc",
  "parking_lot",
  "serde",
  "serde_json",
