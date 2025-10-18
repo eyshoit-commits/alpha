@@ -295,7 +295,7 @@ impl AuthService {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RotationWebhookPayload {
     pub event: String,
     pub key_id: Uuid,

@@ -66,11 +66,36 @@ export interface KeyInfo {
   last_used_at?: string | null;
   expires_at?: string | null;
   key_prefix: string;
+  rotated_from?: string | null;
+  rotated_at?: string | null;
 }
 
 export interface IssuedKeyResponse {
   token: string;
   info: KeyInfo;
+}
+
+export interface RotationWebhookPayload {
+  event: string;
+  key_id: string;
+  previous_key_id: string;
+  rotated_at: string;
+  scope: KeyScope;
+  owner: string;
+  key_prefix: string;
+}
+
+export interface RotationWebhookResponse {
+  event_id: string;
+  signature: string;
+  payload: RotationWebhookPayload;
+}
+
+export interface RotatedKeyResponse {
+  token: string;
+  info: KeyInfo;
+  previous: KeyInfo;
+  webhook: RotationWebhookResponse;
 }
 
 export interface CreateSandboxPayload {
@@ -89,6 +114,12 @@ export interface ExecPayload {
 
 export interface CreateKeyPayload {
   scope: KeyScope;
+  rate_limit?: number;
+  ttl_seconds?: number;
+}
+
+export interface RotateKeyPayload {
+  key_id: string;
   rate_limit?: number;
   ttl_seconds?: number;
 }
@@ -168,17 +199,41 @@ export class ApiClient {
     });
   }
 
+  async rotateKey(payload: RotateKeyPayload): Promise<RotatedKeyResponse> {
+    return this.request<RotatedKeyResponse>(`/api/v1/auth/keys/rotate`, {
+      method: "POST",
+      body: payload,
+    });
+  }
+
+  async verifyRotationWebhook(payload: RotationWebhookPayload, signature: string): Promise<void> {
+    await this.request<void>(`/api/v1/auth/keys/rotated`, {
+      method: "POST",
+      body: payload,
+      headers: {
+        "X-Cave-Webhook-Signature": signature,
+      },
+    });
+  }
+
   async revokeKey(id: string): Promise<void> {
     await this.request<void>(`/api/v1/auth/keys/${id}`, { method: "DELETE" });
   }
 
-  private async request<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  private async request<T>(
+    path: string,
+    options: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
+  ): Promise<T> {
     const url = new URL(path, this.baseUrl);
     const headers: Record<string, string> = {
       Accept: "application/json",
     };
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
+    }
+
+    if (options.headers) {
+      Object.assign(headers, options.headers);
     }
 
     let body: BodyInit | undefined;

@@ -9,7 +9,7 @@ Maintainer: @bkgoder
 ## Zweck
 Dieser Leitfaden dokumentiert die HTTP-Schnittstellen des `cave-daemon` (Sandbox-Lifecycle und API-Key-Verwaltung). Er ergänzt `README.md`, `docs/cli.md`, `docs/operations.md` und verweist auf die generierte OpenAPI-Spezifikation `../openapi.yaml`.
 
-Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/main.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
+Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/server.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
 
 ---
 
@@ -164,11 +164,83 @@ curl -X POST https://cave.example/api/v1/auth/keys \
 }
 ```
 
+Die zurückgegebenen `KeyInfo`-Objekte enthalten Metadaten zur Historie (`rotated_from`, `rotated_at`) sobald ein Schlüssel ersetzt wurde. Die Felder bleiben sonst `null`.
+
 ### GET `/api/v1/auth/keys`
 Listet alle bekannten Keys (Admin-Scope). Antwort: Array aus `KeyInfo` Objekten (`crates/cave-daemon/src/auth.rs`).
 
 ### DELETE `/api/v1/auth/keys/{id}`
 Revokiert einen Key. Erfolgreich mit HTTP 204. `404` wenn ID unbekannt (`AuthService::revoke`).
+
+### POST `/api/v1/auth/keys/rotate`
+Ersetzt einen bestehenden Key durch ein neues Token. Admin-Scope erforderlich.
+
+```bash
+curl -X POST https://cave.example/api/v1/auth/keys/rotate \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rate_limit": 150,
+        "ttl_seconds": 604800
+      }'
+```
+
+**Antwort (200)**
+```json
+{
+  "token": "bkg_demo_rotatedtoken",
+  "info": {
+    "id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
+    "scope": { "type": "namespace", "namespace": "demo" },
+    "rate_limit": 150,
+    "created_at": "2025-10-18T12:30:00Z",
+    "last_used_at": null,
+    "expires_at": "2025-10-25T12:30:00Z",
+    "key_prefix": "bkg_demo_rot",
+    "rotated_from": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+    "rotated_at": "2025-10-18T12:30:00Z"
+  },
+  "previous": {
+    "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+    "scope": { "type": "namespace", "namespace": "demo" },
+    "rate_limit": 100,
+    "created_at": "2025-09-10T09:00:00Z",
+    "last_used_at": "2025-10-18T12:29:58Z",
+    "expires_at": null,
+    "key_prefix": "bkg_demo_abcd",
+    "rotated_from": null,
+    "rotated_at": "2025-10-18T12:30:00Z"
+  },
+  "webhook": {
+    "event_id": "6b4dc7a8-1e5a-4cfa-a2e2-f9d4f2b1c90c",
+    "signature": "BASE64_HMAC",
+    "payload": {
+      "event": "key.rotated",
+      "key_id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
+      "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+      "rotated_at": "2025-10-18T12:30:00Z",
+      "scope": { "type": "namespace", "namespace": "demo" },
+      "owner": "demo",
+      "key_prefix": "bkg_demo_rot"
+    }
+  }
+}
+```
+
+Fehlerfälle:
+- `401` fehlender/ungültiger Token (`AuthError::InvalidToken`).
+- `403` Namespace-Keys dürfen nicht rotieren (`AuthError::Unauthorized`).
+- `404` unbekannte ID.
+- `503` wenn `CAVE_ROTATION_WEBHOOK_SECRET` fehlt (Webhook-Signatur nicht generierbar).
+
+### POST `/api/v1/auth/keys/rotated`
+Validiert ein eingehendes Rotation-Webhook-Ereignis. Erwartet identische Payload wie im vorherigen Response und den Header `X-Cave-Webhook-Signature` (Base64-kodiertes HMAC-SHA256 mit `CAVE_ROTATION_WEBHOOK_SECRET`). Erfolgreich mit HTTP 204.
+
+Fehlerfälle:
+- `401` ohne Signatur-Header oder mit ungültigem Format (`ApiError::unauthorized`).
+- `401` bei Signatur-Mismatch (`AuthError::InvalidSignature`).
+- `403` wenn kein Admin-Scope.
 
 ---
 

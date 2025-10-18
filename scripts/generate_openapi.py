@@ -63,6 +63,54 @@ def issued_key_example() -> Dict[str, Any]:
             "last_used_at": None,
             "expires_at": "2025-11-17T12:00:00Z",
             "key_prefix": "bkg_demo_abcd",
+            "rotated_from": None,
+            "rotated_at": None,
+        },
+    }
+
+
+def rotation_webhook_payload_example() -> Dict[str, Any]:
+    return {
+        "event": "key.rotated",
+        "key_id": "5f86a0ef-55c0-4f50-a1e9-b85a2b3db0fe",
+        "previous_key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+        "rotated_at": "2025-10-18T12:30:00Z",
+        "scope": {"type": "namespace", "namespace": "demo"},
+        "owner": "demo",
+        "key_prefix": "bkg_demo_rot",
+    }
+
+
+def rotated_key_example() -> Dict[str, Any]:
+    payload = rotation_webhook_payload_example()
+    return {
+        "token": "bkg_demo_rotatedtoken",
+        "info": {
+            "id": payload["key_id"],
+            "scope": payload["scope"],
+            "rate_limit": 150,
+            "created_at": payload["rotated_at"],
+            "last_used_at": None,
+            "expires_at": "2025-10-25T12:30:00Z",
+            "key_prefix": payload["key_prefix"],
+            "rotated_from": payload["previous_key_id"],
+            "rotated_at": payload["rotated_at"],
+        },
+        "previous": {
+            "id": payload["previous_key_id"],
+            "scope": payload["scope"],
+            "rate_limit": 100,
+            "created_at": "2025-09-10T09:00:00Z",
+            "last_used_at": "2025-10-18T12:29:58Z",
+            "expires_at": None,
+            "key_prefix": "bkg_demo_abcd",
+            "rotated_from": None,
+            "rotated_at": payload["rotated_at"],
+        },
+        "webhook": {
+            "event_id": "6b4dc7a8-1e5a-4cfa-a2e2-f9d4f2b1c90c",
+            "signature": "BASE64_HMAC",
+            "payload": payload,
         },
     }
 
@@ -268,7 +316,76 @@ def build_spec() -> Dict[str, Any]:
                     "last_used_at": {"type": "string", "format": "date-time", "nullable": True},
                     "expires_at": {"type": "string", "format": "date-time", "nullable": True},
                     "key_prefix": {"type": "string", "description": "Truncated token prefix for audit displays."},
+                    "rotated_from": {"type": "string", "format": "uuid", "nullable": True},
+                    "rotated_at": {"type": "string", "format": "date-time", "nullable": True},
                 },
+                "example": issued_key_example()["info"],
+            },
+            "RotateKeyRequest": {
+                "type": "object",
+                "required": ["key_id"],
+                "properties": {
+                    "key_id": {"type": "string", "format": "uuid"},
+                    "rate_limit": {
+                        "type": "integer",
+                        "format": "int32",
+                        "nullable": True,
+                        "description": "Optional override for the new key's rate limit.",
+                    },
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "format": "int64",
+                        "nullable": True,
+                        "description": "Optional TTL for the rotated key in seconds.",
+                    },
+                },
+                "example": {
+                    "key_id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+                    "rate_limit": 150,
+                    "ttl_seconds": 604800,
+                },
+            },
+            "RotationWebhookPayload": {
+                "type": "object",
+                "required": [
+                    "event",
+                    "key_id",
+                    "previous_key_id",
+                    "rotated_at",
+                    "scope",
+                    "owner",
+                    "key_prefix",
+                ],
+                "properties": {
+                    "event": {"type": "string"},
+                    "key_id": {"type": "string", "format": "uuid"},
+                    "previous_key_id": {"type": "string", "format": "uuid"},
+                    "rotated_at": {"type": "string", "format": "date-time"},
+                    "scope": {"$ref": "#/components/schemas/KeyScope"},
+                    "owner": {"type": "string"},
+                    "key_prefix": {"type": "string"},
+                },
+                "example": rotation_webhook_payload_example(),
+            },
+            "RotationWebhookNotification": {
+                "type": "object",
+                "required": ["event_id", "signature", "payload"],
+                "properties": {
+                    "event_id": {"type": "string", "format": "uuid"},
+                    "signature": {"type": "string", "description": "Base64 encoded HMAC signature."},
+                    "payload": {"$ref": "#/components/schemas/RotationWebhookPayload"},
+                },
+            },
+            "RotatedKeyResponse": {
+                "type": "object",
+                "required": ["token", "info", "previous", "webhook"],
+                "properties": {
+                    "token": {"type": "string"},
+                    "info": {"$ref": "#/components/schemas/KeyInfo"},
+                    "previous": {"$ref": "#/components/schemas/KeyInfo"},
+                    "webhook": {"$ref": "#/components/schemas/RotationWebhookNotification"},
+                },
+                "example": rotated_key_example(),
             },
             "IssuedKeyResponse": {
                 "type": "object",
@@ -302,6 +419,10 @@ def build_spec() -> Dict[str, Any]:
         "409": {
             "description": "Conflict",
             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}, "example": error_example("sandbox 'runner' already exists in namespace 'demo'")}},
+        },
+        "503": {
+            "description": "Service unavailable",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}, "example": error_example("rotation webhook secret is not configured")}},
         },
         "500": {
             "description": "Internal server error",
@@ -648,6 +769,71 @@ def build_spec() -> Dict[str, Any]:
                     "500": responses["500"],
                 },
             },
+        },
+        "/api/v1/auth/keys/rotate": {
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Rotate an API key",
+                "operationId": "rotateKey",
+                "security": [{"bearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RotateKeyRequest"},
+                            "example": components["schemas"]["RotateKeyRequest"]["example"],
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Key rotated",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/RotatedKeyResponse"},
+                                "example": rotated_key_example(),
+                            }
+                        },
+                    },
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "404": responses["404"],
+                    "503": responses["503"],
+                    "500": responses["500"],
+                },
+            }
+        },
+        "/api/v1/auth/keys/rotated": {
+            "post": {
+                "tags": ["Auth"],
+                "summary": "Verify rotation webhook signature",
+                "operationId": "verifyRotationWebhook",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "X-Cave-Webhook-Signature",
+                        "in": "header",
+                        "required": True,
+                        "schema": {"type": "string"},
+                        "description": "Base64 encoded HMAC-SHA256 signature of the payload.",
+                    }
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RotationWebhookPayload"},
+                            "example": rotation_webhook_payload_example(),
+                        }
+                    },
+                },
+                "responses": {
+                    "204": {"description": "Signature accepted"},
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "500": responses["500"],
+                },
+            }
         },
         "/api/v1/auth/keys/{id}": {
             "delete": {
