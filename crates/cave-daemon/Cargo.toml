@@ -28,8 +28,8 @@ base64.workspace = true
 futures.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
-opentelemetry_otlp.workspace = true
-tracing_opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
