@@ -148,27 +148,48 @@ impl Database {
         let now_str = encode_datetime(now);
         let expires_at_str = encode_optional_datetime(expires_at);
         let (scope_type, scope_namespace) = scope.columns();
-        let insert = match self.driver {
+        match self.driver {
             DatabaseDriver::Sqlite => {
-                r#"
-            INSERT INTO api_keys (
-                id, token_hash, token_prefix, scope_type, scope_namespace,
-                rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(token_hash)
-        .bind(token_prefix)
-        .bind(scope_type)
-        .bind(scope_namespace)
-        .bind(rate_limit as i64)
-        .bind(now.to_rfc3339())
-        .bind(expires_at.map(|v| v.to_rfc3339()))
-        .bind(rotated_from.map(|value| value.to_string()))
-        .bind(rotated_at.map(|ts| ts.to_rfc3339()))
-        .execute(&self.pool)
-        .await?;
+                sqlx::query(r#"
+                INSERT INTO api_keys (
+                    id, token_hash, token_prefix, scope_type, scope_namespace,
+                    rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                "#)
+                .bind(id.to_string())
+                .bind(token_hash)
+                .bind(token_prefix)
+                .bind(scope_type)
+                .bind(scope_namespace)
+                .bind(rate_limit as i64)
+                .bind(now.to_rfc3339())
+                .bind(expires_at.map(|v| v.to_rfc3339()))
+                .bind(rotated_from.map(|value| value.to_string()))
+                .bind(rotated_at.map(|ts| ts.to_rfc3339()))
+                .execute(&self.pool)
+                .await?
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(r#"
+                INSERT INTO api_keys (
+                    id, token_hash, token_prefix, scope_type, scope_namespace,
+                    rate_limit, created_at, expires_at, revoked, rotated_from, rotated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10)
+                "#)
+                .bind(encode_uuid(id))
+                .bind(token_hash)
+                .bind(token_prefix)
+                .bind(scope_type)
+                .bind(scope_namespace)
+                .bind(rate_limit as i64)
+                .bind(encode_datetime(now))
+                .bind(expires_at_str)
+                .bind(rotated_from.map(encode_uuid))
+                .bind(rotated_at.map(encode_datetime))
+                .execute(&self.pool)
+                .await?
+            }
+        };
 
         self.fetch_api_key(id)
             .await?
