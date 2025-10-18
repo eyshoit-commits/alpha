@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
         default_runtime: config.default_runtime.clone(),
         default_limits: config.default_limits,
         isolation: config.isolation.clone(),
-        audit: config.audit.clone(),
     };
 
     let runtime = ProcessSandboxRuntime::new(kernel_cfg.isolation.clone())
