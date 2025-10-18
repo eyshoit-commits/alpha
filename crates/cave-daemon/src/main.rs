@@ -1,9 +1,12 @@
 use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+mod auth;
+
 use anyhow::{Context, Result};
+use auth::{AuthError, AuthService, KeyInfo, KeyScope, ScopeRequirement};
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -39,7 +42,8 @@ async fn main() -> Result<()> {
         .context("initializing sandbox runtime")?;
 
     let kernel = CaveKernel::new(db.clone(), runtime, kernel_cfg);
-    let state = Arc::new(AppState { kernel, db });
+    let auth = Arc::new(AuthService::new());
+    let state = Arc::new(AppState { kernel, db, auth });
 
     let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
 
@@ -76,6 +80,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sandboxes/:id/status", get(get_sandbox))
         .route("/api/v1/sandboxes/:id/executions", get(list_executions))
         .route("/api/v1/sandboxes/:id", delete(delete_sandbox))
+        .route("/api/v1/auth/keys", post(issue_key).get(list_keys))
+        .route("/api/v1/auth/keys/:id", delete(revoke_key))
         .with_state(state)
 }
 
@@ -83,6 +89,7 @@ fn build_router(state: Arc<AppState>) -> Router {
 struct AppState {
     kernel: CaveKernel<ProcessSandboxRuntime>,
     db: Database,
+    auth: Arc<AuthService>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,8 +216,16 @@ async fn metrics() -> impl IntoResponse {
 
 async fn create_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<CreateSandboxBody>,
 ) -> Result<Json<SandboxResponse>, ApiError> {
+    let token = require_bearer(&headers)?;
+    state
+        .auth
+        .authorize(token, ScopeRequirement::Namespace(&payload.namespace))
+        .await
+        .map_err(ApiError::from)?;
+
     let limits = payload
         .limits
         .map(|l| l.into_limits(state.kernel.config().default_limits))
@@ -230,11 +245,21 @@ async fn create_sandbox(
 
 async fn list_sandboxes(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<SandboxListQuery>,
 ) -> Result<Json<Vec<SandboxResponse>>, ApiError> {
     let namespace = query
         .namespace
         .ok_or_else(|| ApiError::bad_request("namespace query parameter is required"))?;
+
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     let records = state
         .db
@@ -249,16 +274,38 @@ async fn list_sandboxes(
 
 async fn get_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SandboxResponse>, ApiError> {
     let record = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&record.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     Ok(Json(SandboxResponse::from(record)))
 }
 
 async fn start_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SandboxResponse>, ApiError> {
+    let meta = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&meta.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     let record = state
         .kernel
         .start_sandbox(id)
@@ -269,9 +316,20 @@ async fn start_sandbox(
 
 async fn exec_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(payload): Json<ExecBody>,
 ) -> Result<Json<ExecResponse>, ApiError> {
+    let meta = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&meta.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     let request = ExecRequest {
         command: payload.command,
         args: payload.args.unwrap_or_default(),
@@ -289,8 +347,19 @@ async fn exec_sandbox(
 
 async fn stop_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let meta = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&meta.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     state
         .kernel
         .stop_sandbox(id)
@@ -301,8 +370,19 @@ async fn stop_sandbox(
 
 async fn delete_sandbox(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let meta = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&meta.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     state
         .kernel
         .delete_sandbox(id)
@@ -313,10 +393,21 @@ async fn delete_sandbox(
 
 async fn list_executions(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Query(query): Query<ExecutionQuery>,
 ) -> Result<Json<Vec<ExecutionResponse>>, ApiError> {
     let limit = query.limit.unwrap_or(20).min(100);
+    let meta = state.kernel.get_sandbox(id).await.map_err(ApiError::from)?;
+    state
+        .auth
+        .authorize(
+            require_bearer(&headers)?,
+            ScopeRequirement::Namespace(&meta.namespace),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
     let executions = state
         .kernel
         .recent_executions(id, limit)
@@ -329,6 +420,69 @@ async fn list_executions(
             .map(ExecutionResponse::from)
             .collect(),
     ))
+}
+
+async fn issue_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateKeyBody>,
+) -> Result<Json<IssuedKeyResponse>, ApiError> {
+    let maybe_token = bearer_optional(&headers)?;
+    if state.auth.has_keys().await {
+        let token = maybe_token
+            .ok_or_else(|| ApiError::unauthorized("missing Authorization bearer token"))?;
+        state
+            .auth
+            .authorize(token, ScopeRequirement::Admin)
+            .await
+            .map_err(ApiError::from)?;
+    }
+
+    let scope = match payload.scope {
+        CreateKeyScope::Admin => KeyScope::Admin,
+        CreateKeyScope::Namespace { namespace } => KeyScope::Namespace { namespace },
+    };
+
+    let ttl = payload.ttl_seconds.map(Duration::from_secs);
+    let issued = state
+        .auth
+        .issue_key(scope, payload.rate_limit.unwrap_or(100), ttl)
+        .await
+        .map_err(|err| ApiError::internal(err))?;
+
+    Ok(Json(IssuedKeyResponse {
+        token: issued.token,
+        info: issued.info,
+    }))
+}
+
+async fn list_keys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<KeyInfo>>, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let keys = state.auth.list_keys().await;
+    Ok(Json(keys))
+}
+
+async fn revoke_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    state.auth.revoke(id).await.map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +505,28 @@ struct CreateSandboxLimits {
     disk_mib: Option<u64>,
     #[serde(default)]
     timeout_seconds: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateKeyBody {
+    scope: CreateKeyScope,
+    #[serde(default)]
+    rate_limit: Option<u32>,
+    #[serde(default)]
+    ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CreateKeyScope {
+    Admin,
+    Namespace { namespace: String },
+}
+
+#[derive(Debug, Serialize)]
+struct IssuedKeyResponse {
+    token: String,
+    info: KeyInfo,
 }
 
 impl CreateSandboxLimits {
@@ -525,6 +701,10 @@ impl ApiError {
     fn internal<E: std::fmt::Display>(err: E) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, message)
+    }
 }
 
 impl From<KernelError> for ApiError {
@@ -562,6 +742,19 @@ impl From<KernelError> for ApiError {
     }
 }
 
+impl From<AuthError> for ApiError {
+    fn from(err: AuthError) -> Self {
+        match err {
+            AuthError::InvalidToken => ApiError::unauthorized("invalid API key"),
+            AuthError::Unauthorized => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "insufficient permissions for requested scope",
+            ),
+            AuthError::NotFound => ApiError::new(StatusCode::NOT_FOUND, "key not found"),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         error!(status = %self.status, message = %self.message, "api error");
@@ -583,6 +776,28 @@ fn mi_bytes(value: u64) -> u64 {
 
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
+}
+
+fn require_bearer<'a>(headers: &'a HeaderMap) -> Result<&'a str, ApiError> {
+    bearer_optional(headers)?
+        .ok_or_else(|| ApiError::unauthorized("missing Authorization bearer token"))
+}
+
+fn bearer_optional<'a>(headers: &'a HeaderMap) -> Result<Option<&'a str>, ApiError> {
+    if let Some(value) = headers.get(header::AUTHORIZATION) {
+        let header_value = value
+            .to_str()
+            .map_err(|_| ApiError::unauthorized("invalid Authorization header encoding"))?;
+        if let Some(token) = header_value.strip_prefix("Bearer ") {
+            Ok(Some(token.trim()))
+        } else {
+            Err(ApiError::unauthorized(
+                "Authorization header must be a Bearer token",
+            ))
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 fn bool_env(key: &str) -> Option<bool> {

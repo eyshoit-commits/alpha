@@ -108,6 +108,7 @@ B. Auth & Keys:
 - POST /api/v1/auth/keys/rotate  
 - POST /api/v1/auth/keys/{id}/revoke  
 - POST /api/v1/auth/keys/rotated  ← Rotation‑Webhook notification (optional): notifies registered subscribers about rotated keys
+- Auth Header: `Authorization: Bearer <token>` ist für alle `/api/v1/sandboxes*` und Auth/RBAC Routen verpflichtend, sobald mindestens ein API‑Key existiert.
 
 C. Admin LLM (Admin only):
 - POST /api/v1/admin/llm/models {metadata}  
@@ -169,6 +170,19 @@ Diese Policy ist operativ hilfreich, weil sie zentral die Trace‑Rate aller CAV
 Rotation‑Webhook:
 - Optional: `POST /api/v1/auth/keys/rotated` for notifying registered subscribers (Secrets managers) about rotations. Payload must contain key_id, owner, rotated_at, new_rota_id and be HMAC signed. Webhook registration through `POST /api/v1/admin/webhooks`. All webhook events are audited.
 
+Bootstrap & Betrieb:
+- Beim allerersten Start existiert kein Schlüssel. Der initiale `POST /api/v1/auth/keys` Aufruf darf ohne `Authorization` Header erfolgen und muss einen Admin‑Key erzeugen:
+
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/auth/keys \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":{"type":"admin"},"rate_limit":1000}'
+  ```
+
+  Die Antwort liefert `token` plus Metadaten (`info.*`). Das Klartext‑Token sofort in einem Secret‑Store (Vault, SOPS, KMS) sichern – der Daemon persistiert nur den SHA‑256 Hash.
+- Alle Folgeaufrufe erfordern `Authorization: Bearer <token>` und unterliegen dem Scope (Admin vs. Namespace). Admin‑Keys geben Namespace‑Keys aus, die Sandbox‑APIs auf ein bestimmtes `namespace` beschränken.
+- Abgelaufene oder widerrufene Tokens resultieren in `401`/`403`. Jede Operation (issue/rotate/revoke) landet im Audit‑Log und kann via Rotation‑Webhook gespiegelt werden.
+
 -----------------------------------------------------------------------
 7. DEFAULT SANDBOX EXECUTION POLICY (SCHUTZ)
 -----------------------------------------------------------------------
@@ -179,6 +193,15 @@ Sichere, konservative Defaults:
 - Disk (workspace): 500 MiB
 
 Administratoren können overrides beantragen; alle overrides sind policy‑gated und auditiert.
+
+Laufzeit‑Isolation & ENV Steuerung (`ProcessSandboxRuntime`):
+- `CAVE_DISABLE_ISOLATION=true` deaktiviert Namespaces und cgroups (nur für Debug geeignet).
+- `CAVE_ENABLE_NAMESPACES` / `CAVE_DISABLE_NAMESPACES` (Boolean) überschreiben Namespace‑Support explizit.
+- `CAVE_ENABLE_CGROUPS` / `CAVE_DISABLE_CGROUPS` (Boolean) steuern cgroup‑v2 Limits.
+- `CAVE_ISOLATION_NO_FALLBACK=true` verhindert den automatischen Rückfall auf Plain‑Process, falls `bwrap` fehlt.
+- `CAVE_BWRAP_PATH=/usr/local/bin/bwrap` setzt den Bubblewrap‑Pfad (default: Ergebnis aus `which bwrap`).
+- `CAVE_CGROUP_ROOT=/sys/fs/cgroup/bkg` definiert den cgroup‑Tree für Sandbox Limits; Verzeichnis vor Start anlegen (`root:root`, 0755) und Controller (`cpu`, `memory`, `pids`) aktivieren.
+- `CAVE_WORKSPACE_ROOT` kann auf separaten Storage zeigen (z. B. tmpfs, verschlüsselte Partition) und sollte per Operator Policy gesetzt werden.
 
 -----------------------------------------------------------------------
 8. `cave.yaml` — KONFIG‑SCHEMA & JSON‑SCHEMA PFAD

@@ -26,6 +26,12 @@ WICHTIG: Variablen, die mit `sensitive: true` markiert sind, dürfen niemals in 
 - `BKG_STORAGE_PATH` (sensitive: false)  
   Beschreibung: Root Path für modellspeicher & cache.
 
+- `CAVE_API_ADDR` (sensitive: false)  
+  Beschreibung: Listen Adresse des `cave-daemon` (z. B. `0.0.0.0:8080`). Dev default `127.0.0.1:8080`.
+
+- `CAVE_WORKSPACE_ROOT` (sensitive: false)  
+  Beschreibung: Basisverzeichnis für Sandbox Workspaces. In Prod auf dedizierten Storage mounten (z. B. verschlüsselte Partition, tmpfs).
+
 - `BKG_TLS_CERT` (sensitive: true)  
   Beschreibung: PEM Zertifikat für Service mTLS; in K8s als Secret mounten.
 
@@ -41,6 +47,21 @@ WICHTIG: Variablen, die mit `sensitive: true` markiert sind, dürfen niemals in 
 - `CAVE_OTEL_SAMPLING_RATE` (sensitive: false)  
   Beschreibung: Float zwischen 0.0 und 1.0, default `1.0` (100%). Empfohlen: production 0.05–0.2.  
   Beispiel: `export CAVE_OTEL_SAMPLING_RATE=0.1`
+
+- `CAVE_DISABLE_ISOLATION` / `CAVE_DISABLE_NAMESPACES` / `CAVE_DISABLE_CGROUPS` (sensitive: false)  
+  Beschreibung: Booleans (`true`/`false`) für kontrollierte Abschaltung der Isolation. Nur für Debugging verwenden.
+
+- `CAVE_ENABLE_NAMESPACES` / `CAVE_ENABLE_CGROUPS` (sensitive: false)  
+  Beschreibung: Erzwingt explizit die Aktivierung der jeweiligen Isolation, selbst wenn Defaults deaktiviert würden.
+
+- `CAVE_ISOLATION_NO_FALLBACK` (sensitive: false)  
+  Beschreibung: Verhindert automatisches Zurückfallen auf plain Prozessausführung, falls `bwrap` fehlt.
+
+- `CAVE_BWRAP_PATH` (sensitive: false)  
+  Beschreibung: Absoluter Pfad zur Bubblewrap Binary. Default: Ergebnis von `which bwrap`.
+
+- `CAVE_CGROUP_ROOT` (sensitive: false)  
+  Beschreibung: cgroup‑v2 Root für Sandbox Limits. Beispiel: `/sys/fs/cgroup/bkg` (Operator muss Verzeichnis + Controller konfigurieren).
 
 - `COSIGN_KEY` (sensitive: true)  
   Beschreibung: Signing key for SBOM/SLSA cosign operations in CI. Storage: CI secret store or Vault.

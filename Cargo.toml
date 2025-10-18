@@ -28,7 +28,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "macros", "sqlite", "uuid", "chrono", "migrate"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 parking_lot = "0.12"
-axum = { version = "0.7", features = ["macros", "json", "headers"] }
+axum = { version = "0.7", features = ["macros", "json"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 hyper = { version = "1", features = ["full"] }

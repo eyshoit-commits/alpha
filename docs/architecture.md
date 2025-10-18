@@ -8,9 +8,12 @@ Maintainer: @bkgoder
 ---------
 Dieses Dokument beschreibt die Systemarchitektur der BKG‑Plattform (CAVE) auf hoher Ebene, die wichtigsten Komponenten, die Interaktionen zwischen ihnen und typische Laufzeitabläufe (Sequenzdiagramme in Mermaid). Ziel ist: schnelle Orientierung für Entwickler, Reviewer und CI‑Checks.
 
+Begleitende Richtlinien für LLM-Agenten (Sandbox Coding Agent, Admin-Orchestrator, Specialized Worker) sind in `docs/Agents.md` dokumentiert.
+
 Kernkomponenten
 ---------------
 - `service/cave` (CAVE Kernel): Verantwortlich für Sandbox‑Lifecycle (create/start/exec/stop), Isolation (namespaces, cgroups v2, seccomp), Workspace Overlay und API‑Key‑Erstellung. Exponiert REST + WebSocket + MCP `/mcp` Endpunkte.
+- `cave-daemon` (REST Daemon): Stellt `/api/v1/sandboxes*` sowie Auth/RBAC (`/api/v1/auth/keys*`) bereit; Validierung erfolgt via Bearer Token (Admin- bzw. Namespace-Scope).
 - `bkg_db`: Persistente Postgres‑ähnliche DB mit RLS, speichert Projekte, sandboxes, api_keys (verschlüsselt), model_registry, peers, policies, audit_events.
 - `bkg_llm` (Admin only): LLM Inference Adapter & Model Registry (download, verify, cache). Exponiert Admin‑LLM Endpoints.
 - `plugin_p2p`: P2P Netzwerkschicht (libp2p‑like) für modellchunks & metadata replication; opt‑in für Admin‑CAVEs.
@@ -118,5 +121,6 @@ Operative Hinweise
 - `CAVE_OTEL_SAMPLING_RATE` ist runtime konfigurierbar; setze in Prod < 1.0.  
 - CI‑Jobs: `make api-schema`, `ajv validate`, `make sbom && make slsa` und sign SBOM with `cosign`.  
 - Lockfiles (Cargo.lock, package-lock.json) müssen committed werden; PRs ohne reproduzierbaren lockfile state werden blockiert.
+- Isolation Deployment: Bubblewrap (`bwrap`) und cgroup Root (`CAVE_CGROUP_ROOT`) müssen vor Inbetriebnahme bereitstehen; `CAVE_*_NAMESPACES/CGROUPS` Flags steuern die Aktivierung.
 
 SPDX-License-Identifier: Apache-2.0

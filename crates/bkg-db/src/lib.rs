@@ -1,9 +1,21 @@
 //! BKG persistence layer providing sandbox metadata & execution audit storage.
 //!
 //! This crate offers an async API around SQLite (sqlx) tailored for the
-//! Phase‑0 requirements in the README. It encodes a namespace scoped sandbox
-//! catalog, lifecycle timestamps, and execution audit events that the CAVE
-//! kernel can persist while orchestrating runtimes.
+//! Phase‑0 requirements in the README. Es bildet aktuell die Sandbox-Kataloge
+//! ab und dient gleichzeitig als Ausgangspunkt für den vollständigen bkg-db
+//! Stack (siehe `docs/bkg-db.md`).
+
+pub mod kernel;
+pub mod sql;
+pub mod planner;
+pub mod executor;
+pub mod rls;
+pub mod auth;
+pub mod api;
+pub mod realtime;
+pub mod storage;
+pub mod telemetry;
+pub mod audit;
 
 use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
 
