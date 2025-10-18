@@ -22,6 +22,7 @@ Dieses Dokument priorisiert die anstehenden Arbeiten für BKG mit Fokus auf den 
   1. Isolation-Modul erweitern (`crates/cave-kernel/src/isolation.rs`).
   2. Seccomp-Profile definieren & in Tests abdecken.
   3. Audit-Log Writer implementieren und Deployment-Hooks ergänzen.
+  > Status 2025-10-18: OverlayFS, cgroups v2 und Seccomp-Allowlist laufen im Prozess-Runtime inkl. Linux-Tests (`crates/cave-kernel/src/lib.rs:660-1043`, `crates/cave-kernel/src/isolation.rs:213-403`, `crates/cave-kernel/tests/isolation_linux.rs:1-170`). Bubblewrap-Profile bleiben offen.
 
 ### 2. Persistente `bkg_db` mit RLS
 - **Deliverables**

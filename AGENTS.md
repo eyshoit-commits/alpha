@@ -26,7 +26,7 @@ Version 2.2 · Last updated 2025-10-18 · Maintainer: @bkgoder
 Key directories:
 - `crates/bkg-db` – persistence + migrations (`migrations/0001_init.sql`).  
 - `crates/cave-kernel` – sandbox lifecycle & isolation (`src/lib.rs`, `src/isolation.rs`).  
-- `crates/cave-daemon` – REST/MCP service (`src/main.rs`, `src/auth.rs`, `/api/v1/*`, `/healthz`, `/metrics`).  
+- `crates/cave-daemon` – REST/MCP service (`src/server.rs`, `src/auth.rs`, `/api/v1/*`, `/healthz`, `/metrics`).
 - `.codex/codex_config.toml` – loads `PROMPT.md`, `AGENTS.md`, `docs/Progress.md` for the agent context.
 
 ---
