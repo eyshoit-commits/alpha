@@ -1,57 +1,193 @@
 # docs/api.md
 
-Version: 0.1  
-Letzte Änderung: 2025-10-18  
+Version: 0.2
+Letzte Änderung: 2025-10-18
 Maintainer: @bkgoder
 
 ---
 
 ## Zweck
-REST, WebSocket und pgwire Schnittstellenübersicht für die BKG-Plattform. Ergänzt `README.md` und `docs/bkg-db.md`.
+Dieser Leitfaden dokumentiert die HTTP-Schnittstellen des `cave-daemon` (Sandbox-Lifecycle und API-Key-Verwaltung). Er ergänzt `README.md`, `docs/cli.md`, `docs/operations.md` und verweist auf die generierte OpenAPI-Spezifikation `../openapi.yaml`.
+
+Die Spezifikation wird automatisiert über `make api-schema` erzeugt (`scripts/generate_openapi.py`) und in CI via `openapi-cli validate` geprüft. Änderungen an Handlern unter `crates/cave-daemon/src/main.rs` müssen parallel in dieser Datei und im Schema reflektiert werden.
 
 ---
 
-## HTTP Endpunkte (Auszug)
-- `/api/v1/sandboxes` – POST (create), GET (list).  
-- `/api/v1/sandboxes/{id}/start|exec|stop|status|executions` – Lifecycle.  
-- `/api/v1/auth/keys` – Issue/List.
-- `/api/v1/auth/keys/{id}` – DELETE revoke.
-- `/api/v1/auth/keys/rotate` – Admin-only rotation flow. Body accepts `key_id`, optional `rate_limit` and `ttl_seconds`. Response returns the new token, metadata (`info.rotated_from`, `info.rotated_at`) and queued webhook event (`webhook.event_id`, `webhook.signature`, `webhook.payload`).
-- `/api/v1/auth/keys/rotated` – Rotation webhook verification endpoint. Requires admin bearer token plus `X-Cave-Webhook-Signature` header (Base64 HMAC-SHA256) and the JSON payload containing `key_id`, `previous_key_id`, `rotated_at`, `scope`, `owner`, `key_prefix`.
-- `/api/v1/admin/llm/models/*` – Admin LLM Management.  
-- `/healthz`, `/metrics` – Liveness/Telemetry.
+## Authentifizierung & Scopes
+- Alle geschützten Endpunkte erwarten einen `Authorization: Bearer <token>` Header.
+- Tokens werden durch den Daemon ausgegeben (`POST /api/v1/auth/keys`) und besitzen Scopes:
+  - `admin` – Vollzugriff auf alle Ressourcen.
+  - `namespace` – Zugriff auf eine konkrete Namespace-ID (`scope.namespace`).
+- Der erste Key kann ohne Autorisierung angelegt werden; anschließend ist Admin-Scope erforderlich (`crates/cave-daemon/src/main.rs:534`).
 
-> TODO: Ergänze detailierte Request/Response Schemas und Fehlercodes; generiere `openapi.yaml` innerhalb `make api-schema`.
-
----
-
-## WebSocket / SSE
-- `/api/v1/sandboxes/{id}/logs` (geplant) – Stream von stdout/stderr.  
-- `/api/v1/llm/chat` – Token-Streaming (SSE/WS).  
-- `/realtime` – WAL-basierte Events (siehe `docs/bkg-db.md`).
+Standardfehler:
+- `401 Unauthorized` – Token fehlt oder ist ungültig (`require_bearer` / `AuthError::InvalidToken`).
+- `403 Forbidden` – Token-Scope reicht nicht aus (`AuthError::Unauthorized`).
+- `404 Not Found` – Ressourcen-ID unbekannt (`KernelError::NotFound`, `SandboxError::NotFound`, `AuthError::NotFound`).
+- `409 Conflict` – Lifecycle-Konflikte (z. B. doppelter Name, bereits laufende Sandbox).
 
 ---
 
-## pgwire (geplant)
-- Listener auf Standard-Port (z. B. 54321).  
-- Unterstützt Simple Queries (`SELECT`, `INSERT`, `UPDATE`, `DELETE`).  
-- Auth via JWT (Namespace/Scope).  
-- Erweiterte Features (Portals, Batches) nach RLS-Abnahme.
+## Sandboxes (`/api/v1/sandboxes*`)
+
+### POST `/api/v1/sandboxes`
+Erstellt eine neue Sandbox in einem Namespace. Benötigt Namespace-Scope.
+
+```bash
+curl -X POST https://cave.example/api/v1/sandboxes \
+  -H "Authorization: Bearer $BKG_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "namespace": "demo",
+        "name": "runner",
+        "runtime": "process",
+        "limits": {
+          "cpu_millis": 750,
+          "memory_mib": 1024,
+          "disk_mib": 1024,
+          "timeout_seconds": 120
+        }
+      }'
+```
+
+**Antwort (200)**
+```json
+{
+  "id": "9f9c9872-2d9c-4c25-9c36-4e45be927834",
+  "namespace": "demo",
+  "name": "runner",
+  "runtime": "process",
+  "status": "created",
+  "limits": {
+    "cpu_millis": 750,
+    "memory_mib": 1024,
+    "disk_mib": 1024,
+    "timeout_seconds": 120
+  },
+  "created_at": "2025-10-18T12:34:56Z",
+  "updated_at": "2025-10-18T12:34:56Z",
+  "last_started_at": null,
+  "last_stopped_at": null
+}
+```
+
+Fehler: `400` (fehlende Namespace-Query), `401`, `403`, `409` bei Namensduplikaten (`KernelError::Sandbox`).
+
+### GET `/api/v1/sandboxes?namespace=demo`
+Listet alle Sandboxes eines Namespaces. Query-Parameter `namespace` ist Pflicht (`SandboxListQuery`). Rückgabe: Array von `SandboxResponse`.
+
+### GET `/api/v1/sandboxes/{id}/status`
+Liefert Metadaten einer Sandbox inklusive Lifecycle-Timestamps. Fehlermeldung `404` bei unbekannter ID.
+
+### POST `/api/v1/sandboxes/{id}/start`
+Startet eine Sandbox. Liefert den aktualisierten Datensatz; `409` wenn bereits gestartet (`KernelError::AlreadyRunning`).
+
+### POST `/api/v1/sandboxes/{id}/exec`
+Führt einen Befehl im laufenden Container aus.
+
+**Request**
+```json
+{
+  "command": "python",
+  "args": ["-c", "print('hello')"],
+  "timeout_ms": 2000
+}
+```
+
+**Response (200)**
+```json
+{
+  "exit_code": 0,
+  "stdout": "hello\n",
+  "stderr": "",
+  "duration_ms": 42,
+  "timed_out": false
+}
+```
+
+### POST `/api/v1/sandboxes/{id}/stop`
+Stoppt eine Sandbox. Erfolgreich mit HTTP 204. `409` wenn Sandbox nicht läuft (`KernelError::NotRunning`).
+
+### DELETE `/api/v1/sandboxes/{id}`
+Löscht Sandbox-Ressourcen und Persistenz-Records. Erfolgreich mit HTTP 204.
+
+### GET `/api/v1/sandboxes/{id}/executions`
+Listet die letzten Ausführungen (`limit` Query 1..100, default 20).
+
+**Response**
+```json
+[
+  {
+    "command": "python",
+    "args": ["-c", "print('hello')"],
+    "executed_at": "2025-10-18T12:35:10Z",
+    "exit_code": 0,
+    "stdout": "hello\n",
+    "stderr": "",
+    "duration_ms": 55,
+    "timed_out": false
+  }
+]
+```
 
 ---
 
-## gRPC (Backlog)
-- Services: `SandboxService`, `AuthService`, `RealtimeService`.  
-- IDL/PB-Dateien im Verzeichnis `proto/` (anzulegen).  
-- SLSA Artefakte müssen generierte Clients signieren.
+## API-Schlüssel (`/api/v1/auth/keys*`)
+
+### POST `/api/v1/auth/keys`
+Erzeugt einen API-Key. Ohne vorhandene Keys optional authentifiziert, danach Admin-Scope nötig.
+
+```bash
+curl -X POST https://cave.example/api/v1/auth/keys \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "scope": { "type": "namespace", "namespace": "demo" },
+        "rate_limit": 100,
+        "ttl_seconds": 2592000
+      }'
+```
+
+**Antwort (200)**
+```json
+{
+  "token": "bkg_demo_abcdefghijklmno",
+  "info": {
+    "id": "4b2a4d3a-4cbe-4b05-87a3-9528cdf6a1ed",
+    "scope": { "type": "namespace", "namespace": "demo" },
+    "rate_limit": 100,
+    "created_at": "2025-10-18T12:00:00Z",
+    "last_used_at": null,
+    "expires_at": "2025-11-17T12:00:00Z",
+    "key_prefix": "bkg_demo_abcd"
+  }
+}
+```
+
+### GET `/api/v1/auth/keys`
+Listet alle bekannten Keys (Admin-Scope). Antwort: Array aus `KeyInfo` Objekten (`crates/cave-daemon/src/auth.rs`).
+
+### DELETE `/api/v1/auth/keys/{id}`
+Revokiert einen Key. Erfolgreich mit HTTP 204. `404` wenn ID unbekannt (`AuthService::revoke`).
 
 ---
 
-## Tests & Validierung
-- `openapi-cli validate openapi.yaml` in CI.  
-- Integrationstests (`cargo test -p cave-daemon`) für kritische Endpunkte.  
-- Negative Tests (unauthentifizierte Anfragen, Scope-Verletzungen).  
-- `pytest security/` – prüft Auth-/RLS-Bedingungen.
+## Health & Metrics
+- `GET /healthz` → 200 bei Erfolg (leer). In Deployment-Healthchecks verwenden.
+- `GET /metrics` → `text/plain` Prometheus-Payload, aktuell Platzhalter `bkg_cave_daemon_up 1`.
+
+---
+
+## Fehlervertrag
+Jede JSON-Fehlermeldung folgt dem Schema `{"error": "..."}` (`ErrorBody`). Die genaue Nachricht entspricht dem konkreten Fehlerfall (z. B. `"missing Authorization bearer token"`, `"sandbox ... not found"`). Dies spiegelt die Implementierung in `crates/cave-daemon/src/main.rs` wider (`ApiError`).
+
+---
+
+## Tooling & Tests
+- Schema generieren: `make api-schema` → schreibt `openapi.yaml`.
+- Validierung: `openapi-cli validate openapi.yaml` (CI + lokal) sowie `ajv validate` für `cave.yaml`.
+- Funktions- & Negativtests: `cargo test -p cave-daemon` deckt Handler- und Limit-Konvertierungen ab.
+- Dokumentation aktuell halten: bei Änderungen an Handlern sowohl diese Datei als auch `docs/cli.md`, `docs/governance.md` und `docs/Progress.md` aktualisieren.
 
 ---
 

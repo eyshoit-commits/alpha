@@ -1,48 +1,86 @@
 # docs/cli.md
 
-Version: 0.1  
-Letzte Änderung: 2025-10-18  
+Version: 0.2
+Letzte Änderung: 2025-10-18
 Maintainer: @bkgoder
 
 ---
 
 ## Zweck
-Überblick über CLI-Werkzeuge (`bkg`, `cavectl`) zur Verwaltung von Sandboxes, Keys und Deployments.
+Beschreibt die CLI-Workflows (`bkg`, `cavectl`) zur Interaktion mit der Cave-API. Ergänzt `docs/api.md`, `docs/operations.md` sowie die OpenAPI-Spezifikation (`../openapi.yaml`).
+
+Alle Befehle verwenden denselben Fehlervertrag wie die REST-API (`{"error": "..."}`) und reichen HTTP-Codes direkt durch. Fehlermeldungen aus dem Daemon werden ohne zusätzliche Verarbeitung angezeigt.
 
 ---
 
-## Kernbefehle (`bkg`)
-- `bkg init` – Projektstruktur und `cave.yaml` anlegen.  
-- `bkg add <sandbox>` – Sandbox definieren (Runtime, Limits).  
-- `bkg exe --image <runtime>` – Einmaliger Sandbox-Lauf.  
-- `bkgr` – Persistent Sandbox (Quick Connect).  
-- `bkg schema validate` – `cave.yaml` gegen `schema/cave.schema.json` prüfen (TODO implementieren).  
-- `bkg auth rotate` – Schlüsselrotation auslösen, gibt neues Token + `rotated_from`/`rotated_at` Metadaten und die HMAC-Signatur des Webhook-Events (`event_id`, `signature`).
+## Vorbereitung
+1. API-Key besorgen (`cavectl key issue --scope namespace --ttl 30d`). Alternativ via REST (`POST /api/v1/auth/keys`).
+2. `BKG_API_KEY` exportieren oder `--token` Flag verwenden.
+3. Workspace-Konfiguration (`cave.yaml`) per `bkg init` erzeugen; optional Limits setzen (`bkg config set limits.cpu 750`).
+
+---
+
+## BKG CLI (`bkg`)
+
+| Befehl | Beschreibung | HTTP Endpoint |
+|--------|---------------|---------------|
+| `bkg sandbox create` | Legt Sandbox im Namespace an. | `POST /api/v1/sandboxes` |
+| `bkg sandbox ls --namespace demo` | Listet Sandboxes (erfordert Namespace-Query). | `GET /api/v1/sandboxes?namespace=demo` |
+| `bkg sandbox start <id>` | Startet Sandbox. | `POST /api/v1/sandboxes/{id}/start` |
+| `bkg sandbox exec <id> -- "python" -c 'print("hi")'` | Führt Prozess aus. | `POST /api/v1/sandboxes/{id}/exec` |
+| `bkg sandbox stop <id>` | Stoppt Sandbox (204). | `POST /api/v1/sandboxes/{id}/stop` |
+| `bkg sandbox rm <id>` | Entfernt Sandbox. | `DELETE /api/v1/sandboxes/{id}` |
+| `bkg sandbox executions <id> --limit 10` | Zeigt Historie. | `GET /api/v1/sandboxes/{id}/executions` |
+
+### Beispiele
+
+```bash
+# Sandbox anlegen (siehe docs/api.md für vollständigen Payload)
+bkg sandbox create --namespace demo --name runner --runtime process \
+  --cpu 750 --memory 1024 --disk 1024 --timeout 120
+
+# Laufenden Container nutzen
+bkg sandbox start 9f9c9872-2d9c-4c25-9c36-4e45be927834
+bkg sandbox exec 9f9c9872-2d9c-4c25-9c36-4e45be927834 -- python -c 'print("hello")'
+```
+
+Bei HTTP-Fehlern gibt die CLI den API-Response aus. Beispiel (`409 Conflict`):
+
+```text
+sandbox 'runner' already exists in namespace 'demo'
+```
+
+---
 
 ## Admin CLI (`cavectl`)
-- `cavectl sandbox list|start|stop` – Verwaltungsbefehle (Admin-Scope erforderlich).  
-- `cavectl key issue --scope namespace --ttl 30d` – API-Keys.  
-- `cavectl telemetry set --sampling 0.1` – OTEL Sampling Rate setzen.  
-- `cavectl audit export` – Audit-Log JSONL export.  
-- `cavectl migrate postgres` – Wrapper für Postgres-Migrationen (folgt Plan in `docs/governance.md`).
 
-> TODO: CLI-Kommandos verifizieren, wenn Implementierung steht; Auto-Completion & Hilfe hinzufügen.
+| Befehl | Zweck | HTTP Endpoint |
+|--------|-------|---------------|
+| `cavectl key issue --scope namespace --ttl 30d` | Erstellt Namespace-Key (gibt Token einmalig aus). | `POST /api/v1/auth/keys` |
+| `cavectl key list` | Listet Keys samt Präfixen. | `GET /api/v1/auth/keys` |
+| `cavectl key revoke <uuid>` | Revokiert Key. | `DELETE /api/v1/auth/keys/{id}` |
+| `cavectl health` | Prüft Liveness. | `GET /healthz` |
+| `cavectl metrics` | Holt Prometheus-Payload. | `GET /metrics` |
 
----
-
-## Auth & Konfiguration
-- CLI erwartet `BKG_API_KEY` (Namespace/Admin).  
-- CLI liest `cave.yaml` (Projektsettings).  
-- Override via Flags (`--cpu`, `--memory`, `--timeout`).  
-- Secrets kommen aus Vault/KMS (siehe `docs/governance.md`).
+### Ausgabeformate
+- `cavectl key issue` schreibt Token + `KeyInfo`-JSON (siehe `docs/api.md`).
+- `cavectl key list --format table` mappt `KeyInfo`-Felder (`id`, `scope.type`, `rate_limit`, `last_used_at`).
+- `cavectl metrics` gibt Rohtext zurück; für `jq`/`yq` ungeeignet.
 
 ---
 
-## Roadmap / Backlog
-- [ ] CLI Tests (snapshot-basiert, z. B. mit `assert_cmd`).  
-- [ ] Packaging (Homebrew/Tarballs).  
-- [ ] Telemetry Opt-In (CLI Usage Metrics anonymisiert).  
-- [ ] Integration mit Admin-UI (Deep Links).
+## Fehlbehandlung & Retries
+- `401/403` → CLI schlägt fehl, Hinweis auf Scope oder Token-Gültigkeit.
+- `404` → Ressource nicht gefunden, ID prüfen.
+- `409` → Lifecycle-Konflikt. Bei `start`/`stop` 1x Retry möglich; bei `create` Namespace/Name anpassen.
+- `5xx` → CLI beendet mit Nicht-Null-Exitcode, loggt Response Body.
+
+---
+
+## Automatisierung
+- Schema-Aktualisierung: `make api-schema` (nutzt `scripts/generate_openapi.py`).
+- Validation in CI: `openapi-cli validate openapi.yaml` (siehe `.github/workflows/ci.yml`).
+- CLI-E2E-Tests (Backlog): `cargo test -p cave-daemon` + künftige Integrationstests (`assert_cmd`).
 
 ---
 
