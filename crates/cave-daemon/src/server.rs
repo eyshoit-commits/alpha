@@ -4,6 +4,7 @@ use crate::auth::{
     AuthError, AuthService, KeyInfo, KeyScope, RotationOutcome, RotationWebhookPayload,
     ScopeRequirement,
 };
+use crate::middleware::rate_limit::{rate_limit_layer, RateLimitConfig};
 use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
@@ -18,19 +19,13 @@ use cave_kernel::{
     AuditConfig, CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings,
     KernelConfig, KernelError, ProcessSandboxRuntime,
 };
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, warn};
-use tracing_subscriber::{
-    filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-};
+use tracing::{error, info};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
 pub async fn run() -> Result<()> {
-    initialize_tracing();
-
     let config = AppConfig::from_env()?;
 
     let db = Database::connect(&config.db_url)
@@ -55,7 +50,9 @@ pub async fn run() -> Result<()> {
     ));
     let state = Arc::new(AppState { kernel, db, auth });
 
-    let app = build_router(state.clone()).layer(TraceLayer::new_for_http());
+    let app = build_router(state.clone())
+        .layer(rate_limit_layer(RateLimitConfig::default()))
+        .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
@@ -66,82 +63,6 @@ pub async fn run() -> Result<()> {
         .await
         .context("HTTP server exited")?;
     Ok(())
-}
-
-fn initialize_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let (sampling_rate, warning) = read_sampling_rate();
-
-    if sampling_rate >= 1.0 {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .init();
-    } else {
-        let rate = sampling_rate;
-        let sampling_filter = filter_fn(move |metadata| {
-            if metadata.is_event() {
-                rand::thread_rng().gen_bool(rate)
-            } else {
-                true
-            }
-        });
-
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer().with_filter(sampling_filter))
-            .init();
-    }
-
-    if let Some(message) = warning {
-        warn!("{message}");
-    }
-
-    info!(sampling_rate, "telemetry sampling configured");
-}
-
-fn read_sampling_rate() -> (f64, Option<String>) {
-    let raw = env::var("CAVE_OTEL_SAMPLING_RATE").ok();
-    parse_sampling_rate(raw.as_deref())
-}
-
-fn parse_sampling_rate(raw: Option<&str>) -> (f64, Option<String>) {
-    match raw {
-        None => (1.0, None),
-        Some(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return (
-                    1.0,
-                    Some("CAVE_OTEL_SAMPLING_RATE is empty; defaulting to 1.0".to_string()),
-                );
-            }
-
-            match trimmed.parse::<f64>() {
-                Ok(parsed) => {
-                    if (0.0..=1.0).contains(&parsed) {
-                        (parsed, None)
-                    } else {
-                        let clamped = parsed.clamp(0.0, 1.0);
-                        (
-                            clamped,
-                            Some(format!(
-                                "CAVE_OTEL_SAMPLING_RATE={} outside 0.0..=1.0; clamped to {}",
-                                trimmed, clamped
-                            )),
-                        )
-                    }
-                }
-                Err(_) => (
-                    1.0,
-                    Some(format!(
-                        "CAVE_OTEL_SAMPLING_RATE='{}' is not a valid float; defaulting to 1.0",
-                        trimmed
-                    )),
-                ),
-            }
-        }
-    }
 }
 
 fn build_router(state: Arc<AppState>) -> Router {

@@ -54,12 +54,12 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
   Status: Admin-Rotation (`POST /api/v1/auth/keys/rotate`) erstellt ein neues Token, markiert das alte als `revoked`, persistiert `rotated_from`/`rotated_at` und legt das HMAC-signierte Webhook-Event in der Outbox ab; `/api/v1/auth/keys/rotated` prüft den Header `X-Cave-Webhook-Signature` (`crates/cave-daemon/src/main.rs:147-210`, `crates/cave-daemon/src/auth.rs:57-310`, `crates/bkg-db/src/lib.rs:90-220`).
 - [x] API-Schlüssel persistent speichern (SQLite/Postgres) statt ausschließlich In-Memory, damit Restarts keinen Re-Issue erfordern.
   Status: `AuthService` nutzt `bkg_db::Database` für Ausgabe, Rotation und Nutzungstracking (Hashing, Revocation, Touch) über SQLite (`crates/cave-daemon/src/auth.rs:66-210`, `crates/bkg-db/src/lib.rs:45-228`). Follow-up: Postgres-Migration & Verschlüsselungsstrategie definieren (`docs/architecture.md:16`).
-- [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
-  Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
-- [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
-  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/server.rs`); OTEL-Exporter & Monitoring fehlen weiterhin.
-- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
-  Status: Keine Audit-Log-Writer implementiert.
+- [x] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).
+  Status: Middleware-basierte Limits erzwingen die Vorgaben für Admin/Namespace/Session-Routen (`crates/cave-daemon/src/middleware/rate_limit.rs`), inklusive Tests für Klassifizierung & Kontingentverbrauch.
+- [x] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
+  Status: `telemetry::init` initialisiert OTLP-Export mit Sampling & Graceful-Fallback (`crates/cave-daemon/src/telemetry.rs`), Dokumentation in `docs/telemetry.md` ergänzt.
+- [x] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.
+  Status: `AuditLogWriter` schreibt HMAC-signierte JSONL und ist durch Tests abgesichert (`crates/cave-kernel/src/audit.rs:200-257`).
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
   Status: Der Prozess-Runtime setzt OverlayFS + Seccomp-Allowlist ohne Bubblewrap um (`crates/cave-kernel/src/lib.rs:660-1043`); fertige Bubblewrap-Profile zur Namespace-Härtung müssen noch ergänzt werden.
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  

@@ -41,6 +41,10 @@ jsonwebtoken = "9"
 base64 = "0.21"
 hmac = "0.12"
 utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
+opentelemetry = { version = "0.21", features = ["trace"] }
+opentelemetry-sdk = { version = "0.21", features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.14", features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.24"
 
 [workspace.metadata]
 workspace-description = "BKG Phase-0 Rust workspace (cave kernel, db, daemon)"
