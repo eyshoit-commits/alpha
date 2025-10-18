@@ -33,6 +33,7 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["trace"] }
 hyper = { version = "1", features = ["full"] }
 futures = "0.3"
+which = "5"
 
 [workspace.metadata]
 workspace-description = "BKG Phase-0 Rust workspace (cave kernel, db, daemon)"

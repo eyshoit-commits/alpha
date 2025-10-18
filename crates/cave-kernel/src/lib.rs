@@ -7,6 +7,8 @@
 //! layered in later; the current runtime is a safe process isolation shim that
 //! operates within a prepared workspace directory.
 
+mod isolation;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -21,11 +23,13 @@ use bkg_db::{
     SandboxStatus,
 };
 use chrono::Utc;
+use isolation::{add_pid_to_cgroup, cleanup_cgroup, prepare_cgroup};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex};
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
+use which::which;
 use uuid::Uuid;
 
 const DEFAULT_RUNTIME_KIND: &str = "process";
@@ -36,6 +40,7 @@ pub struct KernelConfig {
     pub workspace_root: PathBuf,
     pub default_limits: ResourceLimits,
     pub default_runtime: String,
+    pub isolation: IsolationSettings,
 }
 
 impl KernelConfig {
@@ -51,6 +56,29 @@ impl Default for KernelConfig {
             workspace_root: PathBuf::from("./.cave_workspaces"),
             default_limits: ResourceLimits::default(),
             default_runtime: DEFAULT_RUNTIME_KIND.to_string(),
+            isolation: IsolationSettings::default(),
+        }
+    }
+}
+
+/// Configures how the runtime applies host isolation primitives.
+#[derive(Debug, Clone)]
+pub struct IsolationSettings {
+    pub enable_namespaces: bool,
+    pub enable_cgroups: bool,
+    pub bubblewrap_path: Option<PathBuf>,
+    pub cgroup_root: Option<PathBuf>,
+    pub fallback_to_plain: bool,
+}
+
+impl Default for IsolationSettings {
+    fn default() -> Self {
+        Self {
+            enable_namespaces: true,
+            enable_cgroups: true,
+            bubblewrap_path: None,
+            cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/bkg")),
+            fallback_to_plain: true,
         }
     }
 }
