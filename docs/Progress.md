@@ -3,7 +3,7 @@
 Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## Aktueller Status (Stand 2025-10-18)
-- Phase-0 Komponenten sind teilweise implementiert: Der Kernel nutzt ein Prozess-basiertes Isolation-Shim, tiefe Namespace/Seccomp-Logik und Tests fehlen noch (`crates/cave-kernel/src/lib.rs:1`).
+- Phase-0 Komponenten sind teilweise implementiert: Das Prozess-Shim spannt jetzt Overlay-Workspaces und eine konfigurierbare Seccomp-BPF-Filterung auf, inklusive Linux-Tests für geblockte Sockets sowie nicht-persistente Schreibversuche (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Namespace-Hardening via Bubblewrap bleibt offen.
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
