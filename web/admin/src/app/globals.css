@@ -9,8 +9,14 @@
 
 body {
   margin: 0;
-  color: rgb(15 23 42);
-  background: rgb(248 250 252);
+  color: #e2e8f0;
+  background: #0a0e27;
+  background-image: 
+    linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+    radial-gradient(circle at 50% 50%, rgba(0, 212, 255, 0.05) 0%, transparent 50%);
+  background-size: 50px 50px, 50px 50px, 100% 100%;
+  background-position: 0 0, 0 0, center;
 }
 
 a {

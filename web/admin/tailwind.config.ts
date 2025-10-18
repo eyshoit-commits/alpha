@@ -30,6 +30,18 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
+        cyber: {
+          bg: '#0a0e27',
+          card: '#12172f',
+          dark: '#1a1f3a',
+          border: '#2d3561',
+        },
+        neon: {
+          blue: '#00d4ff',
+          cyan: '#00fff5',
+          purple: '#b967ff',
+          pink: '#ff00ff',
+        },
         blue: {
           50: '#eff6ff',
           100: '#dbeafe',
@@ -42,6 +54,16 @@ const config: Config = {
           800: '#1e40af',
           900: '#1e3a8a',
         },
+      },
+      boxShadow: {
+        'neon-blue': '0 0 20px rgba(0, 212, 255, 0.5)',
+        'neon-cyan': '0 0 20px rgba(0, 255, 245, 0.5)',
+      },
+      backgroundImage: {
+        'cyber-grid': 'linear-gradient(rgba(0, 212, 255, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 212, 255, 0.05) 1px, transparent 1px)',
+      },
+      backgroundSize: {
+        'grid': '50px 50px',
       },
     },
   },

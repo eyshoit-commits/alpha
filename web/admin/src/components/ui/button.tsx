@@ -10,10 +10,10 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-blue-600 text-white hover:bg-blue-500 focus:ring-blue-400 shadow-md",
-  secondary: "bg-white text-slate-800 border-2 border-slate-300 hover:bg-blue-50 hover:border-blue-400 focus:ring-blue-400 shadow-sm",
-  danger: "bg-red-600 text-white hover:bg-red-500 focus:ring-red-400 shadow-md",
-  ghost: "text-slate-700 hover:bg-blue-50 hover:text-blue-700 focus:ring-blue-400",
+  primary: "bg-gradient-to-r from-cyan-500 to-blue-500 text-white hover:from-cyan-400 hover:to-blue-400 focus:ring-cyan-400 shadow-lg shadow-cyan-500/50 hover:shadow-cyan-400/60 font-bold",
+  secondary: "bg-[#1a1f3a] text-cyan-400 border-2 border-cyan-500/50 hover:bg-[#2d3561] hover:border-cyan-400 hover:shadow-lg hover:shadow-cyan-500/30 focus:ring-cyan-400 font-semibold",
+  danger: "bg-gradient-to-r from-red-600 to-pink-600 text-white hover:from-red-500 hover:to-pink-500 focus:ring-red-400 shadow-lg shadow-red-500/50",
+  ghost: "text-cyan-400 hover:bg-[#1a1f3a] hover:text-cyan-300 focus:ring-cyan-400",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {

@@ -9,24 +9,24 @@ interface AlertProps {
 
 const variantStyles: Record<AlertVariant, { container: string; title: string; icon: string }> = {
   success: {
-    container: "border-blue-200 bg-blue-50 text-blue-900",
-    title: "text-blue-900",
-    icon: "text-blue-600",
+    container: "border-2 border-cyan-500/50 bg-cyan-900/20 text-cyan-100 shadow-lg shadow-cyan-500/20",
+    title: "text-cyan-300",
+    icon: "text-cyan-400",
   },
   error: {
-    container: "border-red-200 bg-red-50 text-red-900",
-    title: "text-red-900",
-    icon: "text-red-600",
+    container: "border-2 border-red-500/50 bg-red-900/20 text-red-100 shadow-lg shadow-red-500/20",
+    title: "text-red-300",
+    icon: "text-red-400",
   },
   warning: {
-    container: "border-amber-200 bg-amber-50 text-amber-900",
-    title: "text-amber-900",
-    icon: "text-amber-600",
+    container: "border-2 border-yellow-500/50 bg-yellow-900/20 text-yellow-100 shadow-lg shadow-yellow-500/20",
+    title: "text-yellow-300",
+    icon: "text-yellow-400",
   },
   info: {
-    container: "border-blue-200 bg-blue-50 text-blue-900",
-    title: "text-blue-900",
-    icon: "text-blue-600",
+    container: "border-2 border-purple-500/50 bg-purple-900/20 text-purple-100 shadow-lg shadow-purple-500/20",
+    title: "text-purple-300",
+    icon: "text-purple-400",
   },
 };
 
