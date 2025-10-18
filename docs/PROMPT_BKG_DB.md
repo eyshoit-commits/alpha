@@ -15,6 +15,9 @@ Objekt‑Storage und einem Admin‑UI.
 Die nachfolgenden Abschnitte beschreiben die notwendige Ordnerstruktur,
 die wichtigsten Features sowie konkrete Implementierungs- und Workflow‑Schritte.
 
+> Ergänzende Architektur- und Statusinformationen befinden sich in `docs/bkg-db.md`
+> sowie in `docs/Progress.md` und `docs/roadmap.md`.
+
 Bezug zum Repository
 
 Alle Pfade und Strukturen beziehen sich auf das BKG‑Repository, wie es in

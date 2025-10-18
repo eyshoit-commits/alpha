@@ -58,6 +58,7 @@ Dieses Dokument priorisiert die anstehenden Arbeiten für BKG mit Fokus auf den 
 - Schlüsselrotation + Webhook (`/api/v1/auth/keys/rotated`) implementieren.
 - Rate-Limit Durchsetzung im Gateway (Admin 1000/min, Namespace 100/min, etc.).
 - Telemetrie (`CAVE_OTEL_SAMPLING_RATE`) in Services einbinden.
+- Seccomp/Namespace Hardening dokumentieren (Host-Anforderungen, Profile, Tests) und in Kernel-Roadmap aufnehmen.
 
 ### Dokumentation
 - Fehlende Pflichtdokumente erstellen (`docs/api.md`, `docs/cli.md`, `docs/security.md`, …).

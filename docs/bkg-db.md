@@ -17,7 +17,7 @@ Dieser Leitfaden definiert die vollständige Entwicklungsroadmap für **bkg-db**
 | --- | --- |
 | **Kernel** | MVCC-Storage, Write-Ahead-Log (WAL), Checkpoints, Snapshot Isolation |
 | **SQL-Pipeline** | Parser → Planner → Executor (SQL92-kompatibel) |
-| **Auth/RLS** | JWT-basierte Authentifizierung, Row-Level-Security |
+| **Auth/RLS** | JWT-basierte Authentifizierung, Row-Level-Security, persistente API-Keys |
 | **API-Layer** | PostgreSQL Wire-Protokoll, HTTP (REST), gRPC |
 | **Realtime/CDC** | WAL-basierte Subscriptions via WebSocket |
 | **Objekt-Storage** | Buckets, presigned URLs, S3-kompatible Backends |
@@ -74,6 +74,7 @@ Dieser Leitfaden definiert die vollständige Entwicklungsroadmap für **bkg-db**
 - **Clean-Room:** Kein Copy/Paste aus externen Projekten; sämtliche Implementierungen (Kernel, SQL-Pipeline, API-Layer etc.) werden eigenständig erstellt.
 - **RLS-Policies:** Vor jeder Query sind Row-Level-Security-Policies zu evaluieren.
 - **Audit-Events:** DDL/DML-Operationen werden als JSON Lines protokolliert und mit `cosign` signiert.
+- **API-Key Persistenz:** Ausgestellte Keys werden in `api_keys` (hashed Token, Prefix, Scope, TTL) gespeichert und aus `cave-daemon` via `bkg_db::Database` verwaltet.
 - **Telemetry:** `CAVE_OTEL_SAMPLING_RATE` respektieren (Dev 1.0 / Prod 0.05).
 
 ---
