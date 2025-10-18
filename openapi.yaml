@@ -1,0 +1,587 @@
+openapi: 3.1.0
+info:
+  title: CAVE Daemon API
+  version: 0.1.0
+servers:
+  - url: https://cave.example/api
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: healthz
+      responses:
+        '200':
+          description: Service is healthy
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: metrics
+      responses:
+        '200':
+          description: Prometheus metrics export
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/v1/sandboxes:
+    post:
+      summary: Create sandbox
+      operationId: createSandbox
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSandboxBody'
+      responses:
+        '201':
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      summary: List sandboxes
+      operationId: listSandboxes
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: namespace
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Namespace to filter by
+      responses:
+        '200':
+          description: List of sandboxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SandboxResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/sandboxes/{id}:
+    get:
+      summary: Get sandbox
+      operationId: getSandbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Sandbox details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete sandbox
+      operationId: deleteSandbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '204':
+          description: Sandbox deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/sandboxes/{id}/start:
+    post:
+      summary: Start sandbox
+      operationId: startSandbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Sandbox started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/sandboxes/{id}/stop:
+    post:
+      summary: Stop sandbox
+      operationId: stopSandbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '204':
+          description: Sandbox stopped
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/sandboxes/{id}/exec:
+    post:
+      summary: Execute command in sandbox
+      operationId: execSandbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecBody'
+      responses:
+        '200':
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/sandboxes/{id}/executions:
+    get:
+      summary: Recent executions
+      operationId: listExecutions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+          description: Maximum number of executions to return
+      responses:
+        '200':
+          description: Execution history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExecutionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/auth/keys:
+    post:
+      summary: Issue API key
+      operationId: issueKey
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateKeyBody'
+      responses:
+        '201':
+          description: Issued key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssuedKeyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      summary: List API keys
+      operationId: listKeys
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: API keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/KeyInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/auth/keys/{id}:
+    delete:
+      summary: Revoke API key
+      operationId: revokeKey
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Identifier of the key to revoke
+      responses:
+        '204':
+          description: Key revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Token
+      description: Bearer token issued via /api/v1/auth/keys
+  parameters:
+    SandboxId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Sandbox identifier
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Conflict:
+      description: Conflicting state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+  schemas:
+    CreateSandboxBody:
+      type: object
+      required:
+        - namespace
+        - name
+      properties:
+        namespace:
+          type: string
+        name:
+          type: string
+        runtime:
+          type: string
+          nullable: true
+          description: Optional runtime identifier
+        limits:
+          $ref: '#/components/schemas/CreateSandboxLimits'
+    CreateSandboxLimits:
+      type: object
+      properties:
+        cpu_millis:
+          type: integer
+          format: int32
+        memory_mib:
+          type: integer
+          format: int64
+        disk_mib:
+          type: integer
+          format: int64
+        timeout_seconds:
+          type: integer
+          format: int32
+    SandboxResponse:
+      type: object
+      required:
+        - id
+        - namespace
+        - name
+        - runtime
+        - status
+        - limits
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+        name:
+          type: string
+        runtime:
+          type: string
+        status:
+          type: string
+        limits:
+          $ref: '#/components/schemas/SandboxLimits'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_started_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_stopped_at:
+          type: string
+          format: date-time
+          nullable: true
+    SandboxLimits:
+      type: object
+      required:
+        - cpu_millis
+        - memory_mib
+        - disk_mib
+        - timeout_seconds
+      properties:
+        cpu_millis:
+          type: integer
+          format: int32
+        memory_mib:
+          type: integer
+          format: int64
+        disk_mib:
+          type: integer
+          format: int64
+        timeout_seconds:
+          type: integer
+          format: int32
+    ExecBody:
+      type: object
+      required:
+        - command
+      properties:
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+          nullable: true
+        stdin:
+          type: string
+          nullable: true
+        timeout_ms:
+          type: integer
+          format: int64
+          nullable: true
+    ExecResponse:
+      type: object
+      required:
+        - exit_code
+        - duration_ms
+        - timed_out
+      properties:
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+        stdout:
+          type: string
+          nullable: true
+        stderr:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+        timed_out:
+          type: boolean
+    ExecutionResponse:
+      type: object
+      required:
+        - command
+        - args
+        - executed_at
+        - duration_ms
+        - timed_out
+      properties:
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        executed_at:
+          type: string
+          format: date-time
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+        stdout:
+          type: string
+          nullable: true
+        stderr:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+        timed_out:
+          type: boolean
+    ErrorBody:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    CreateKeyBody:
+      type: object
+      required:
+        - scope
+      properties:
+        scope:
+          $ref: '#/components/schemas/CreateKeyScope'
+        rate_limit:
+          type: integer
+          format: int32
+          nullable: true
+        ttl_seconds:
+          type: integer
+          format: int64
+          nullable: true
+    CreateKeyScope:
+      type: object
+      oneOf:
+        - required: [type]
+          properties:
+            type:
+              type: string
+              enum: [admin]
+        - required: [type, namespace]
+          properties:
+            type:
+              type: string
+              enum: [namespace]
+            namespace:
+              type: string
+    IssuedKeyResponse:
+      type: object
+      required:
+        - token
+        - info
+      properties:
+        token:
+          type: string
+        info:
+          $ref: '#/components/schemas/KeyInfo'
+    KeyInfo:
+      type: object
+      required:
+        - id
+        - scope
+        - rate_limit
+        - created_at
+        - key_prefix
+      properties:
+        id:
+          type: string
+          format: uuid
+        scope:
+          $ref: '#/components/schemas/KeyScope'
+        rate_limit:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        key_prefix:
+          type: string
+    KeyScope:
+      type: object
+      oneOf:
+        - required: [type]
+          properties:
+            type:
+              type: string
+              enum: [admin]
+        - required: [type, namespace]
+          properties:
+            type:
+              type: string
+              enum: [namespace]
+            namespace:
+              type: string

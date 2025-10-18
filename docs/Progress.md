@@ -6,13 +6,13 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - Phase-0 Komponenten sind teilweise implementiert: Der Kernel nutzt ein Prozess-basiertes Isolation-Shim, tiefe Namespace/Seccomp-Logik und Tests fehlen noch (`crates/cave-kernel/src/lib.rs:1`).
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
-- Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
-- Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
-- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
+- Dokumentation deckt nun API-/CLI-Details ab: realistische Beispiele und Fehlerverträge in `docs/api.md` und `docs/cli.md` referenzieren `openapi.yaml` (`docs/api.md:1`, `docs/cli.md:1`).
+- CI-Pipeline führt Format/Lint/Test, Schema-Generierung (`make api-schema`) sowie SBOM-Erstellung aus; `make slsa` bleibt Platzhalter und Cosign-Signing läuft nur bei vorhandenen Secrets (`.github/workflows/ci.yml:1`).
+- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/server.rs`).
 
 ## Phase-0 Verpflichtungen
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
-  Status: Kern-API existiert, Isolation ist ein Prozess-Shim ohne Low-Level-Schutz & Integrationstests (`crates/cave-kernel/src/lib.rs:1`). Ein neuer HTTP-Lifecycle-Test orchestriert `create/start/exec/stop` über den Daemon und prüft Status-/Execution-Persistenz gegen SQLite (`crates/cave-daemon/src/main.rs:975`); Low-Level-Isolation & Seccomp fehlen weiterhin.
+  Status: Kern-API existiert, Isolation ist ein Prozess-Shim ohne Low-Level-Schutz & Integrationstests (`crates/cave-kernel/src/lib.rs:1`). Ein neuer HTTP-Lifecycle-Test orchestriert `create/start/exec/stop` über den Daemon und prüft Status-/Execution-Persistenz gegen SQLite (`crates/cave-daemon/src/server.rs`); Low-Level-Isolation & Seccomp fehlen weiterhin.
 - [ ] Persistente `bkg_db` mit Row-Level-Security betriebsbereit und angebunden.  
   Status: SQLite-Backed Prototyp speichert API-Keys und RLS-Policies inkl. WAL-Recovery (`crates/bkg-db/src/lib.rs:169`, `crates/bkg-db/src/executor.rs:44`); Postgres-Pool & Service-Wiring stehen weiterhin aus (`docs/architecture.md:16`).
 - [ ] Web-UI (admin & user) mit Minimalfunktionen live; Phasenabschluss dokumentiert.  
@@ -35,8 +35,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Dokumente existieren, Review ausstehend (`docs/architecture.md:1`, `docs/env.md:1`).
 
 ## CI, Tests & Artefakte
-- [ ] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.  
-  Status: Workflow (`.github/workflows/ci.yml`) erstellt, `make api-schema` Schritt fehlt weiterhin.
+- [x] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.
+  Status: Schema-Generierung erfolgt über `cargo run --bin export-openapi` (utoipa-basierte Handler-Annotationen in `crates/cave-daemon/src/server.rs`), CI ruft Target & Validator auf und stellt sicher, dass das Schema eingecheckt bleibt (`.github/workflows/ci.yml:33`).
 - [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).  
   Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
 - [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.  
@@ -52,7 +52,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
 - [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
-  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/main.rs:48`); OTEL-Exporter & Monitoring fehlen weiterhin.
+  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/server.rs`); OTEL-Exporter & Monitoring fehlen weiterhin.
 - [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
   Status: Keine Audit-Log-Writer implementiert.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  

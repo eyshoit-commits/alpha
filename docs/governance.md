@@ -59,17 +59,27 @@ Dieses Dokument beschreibt Governance-, Secrets- und Betriebsrichtlinien für di
 ---
 
 ## 4. Auditing & Compliance
-- Audit-Logs müssen als signierte JSON-Lines vorliegen (cosign).  
-- Bewahre Logs in S3/Blob-Speicher mit WORM (Write Once Read Many) auf.  
-- Führe monatliche Audit-Reviews durch (Rotationen, Sandbox-Ausreißer, Telemetrie).  
+- Audit-Logs müssen als signierte JSON-Lines vorliegen (cosign).
+- Bewahre Logs in S3/Blob-Speicher mit WORM (Write Once Read Many) auf.
+- Führe monatliche Audit-Reviews durch (Rotationen, Sandbox-Ausreißer, Telemetrie).
 - Erstelle Incident-Response-Playbooks für Schlüsselverlust, Audit-Manipulation, Telemetrie-Ausfall.
 
 ---
 
-## 5. Governance-Backlog
-- [ ] Vault/KMS-Integration fertigstellen (Secret Lifecycle, Access Policies).  
-- [ ] RLS-Policy-Library dokumentieren (Templates, Approval-Prozess).  
-- [ ] Monitoring-Playbooks für neue Sandbox-Limits finalisieren.  
+## 5. Build- & Lieferketten-Automatisierung
+- **OpenAPI-Schema**: `make api-schema` erzeugt `openapi.yaml` per `cargo run --bin export-openapi`; CI ruft das Target auf und prüft mittels `openapi-cli validate`, dass der Commit-Stand eingecheckt bleibt (`.github/workflows/ci.yml`). Die Quelle dafür sind die `utoipa`-Annotationen an den Axum-Handlern (`crates/cave-daemon/src/server.rs`).
+- **Schema-Drift**: Jeder CI-Lauf führt `git diff --exit-code -- openapi.yaml` aus; Abweichungen brechen den Build und verweisen auf nachzuholende Commits.
+- **SBOM**: `supply-chain`-Job nutzt Syft (`sbom.json`). Ergebnis bleibt Artefakt; Signatur erfolgt nur, wenn `COSIGN_KEY_B64` Secret gesetzt oder `cosign.key` eingecheckt ist.
+- **Cosign**: Signing-Step überspringt sich ohne Secret, vermeidet Fehlalarme. Bereitgestellte Schlüssel werden aus dem Secret Base64-dekodiert und nicht im Repo persistiert.
+- **SLSA**: Platzhalter (`echo "TODO: invoke make slsa once implemented"`). Sobald `make slsa` existiert, Schritt ersetzen und Signaturpfad dokumentieren.
+- **SBOM/SLSA Verification**: Downstream-Checks müssen `cosign verify-blob sbom.json --signature sbom.sig --key cosign.pub` berücksichtigen; `sbom.sig` wird nur erzeugt, wenn Signing-Secret vorliegt.
+
+---
+
+## 6. Governance-Backlog
+- [ ] Vault/KMS-Integration fertigstellen (Secret Lifecycle, Access Policies).
+- [ ] RLS-Policy-Library dokumentieren (Templates, Approval-Prozess).
+- [ ] Monitoring-Playbooks für neue Sandbox-Limits finalisieren.
 - [ ] Incident-Runbooks (Sandbox-Ausfall, RLS-Durchbruch, Cosign-Fehler) erweitern.
 
 ---
