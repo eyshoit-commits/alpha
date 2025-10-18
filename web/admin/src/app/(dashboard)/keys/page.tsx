@@ -210,106 +210,79 @@ export default function KeysPage() {
           </Alert>
         )}
         {rotationResult && (
-          <div className="mt-4 space-y-3 rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
-            <header>
-              <p className="font-semibold">Rotation completed</p>
-              <p className="text-xs text-blue-800">Previous key {rotationResult.previous.key_prefix} superseded.</p>
-            </header>
-            <p className="break-all">
-              <span className="font-medium">New token:</span> {rotationResult.token}
+          <Alert variant="info" title="🔄 Rotation Completed">
+            <p className="text-sm text-slate-600 mb-2">
+              Previous key <code className="bg-blue-100 px-2 py-1 rounded font-mono">{rotationResult.previous.key_prefix}</code> superseded
             </p>
-            <p className="text-xs text-blue-800">
-              Webhook event <code className="rounded bg-blue-100 px-1">{rotationResult.webhook.event_id}</code> pending
-              acknowledgement.
+            <p className="font-mono break-all bg-white p-3 rounded border-2 border-blue-200 mt-2">
+              {rotationResult.token}
             </p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleAcknowledge}
-                className="rounded-md border border-blue-200 bg-white px-3 py-2 text-xs font-semibold"
-              >
-                Acknowledge webhook
-              </button>
-              {rotationAck && <span className="self-center text-xs font-medium text-emerald-700">{rotationAck}</span>}
+            <p className="text-sm mt-3">
+              Webhook event <code className="bg-blue-100 px-2 py-1 rounded font-mono">{rotationResult.webhook.event_id}</code> pending acknowledgement
+            </p>
+            <div className="flex gap-2 mt-4">
+              <Button size="sm" onClick={handleAcknowledge}>
+                Acknowledge Webhook
+              </Button>
+              {rotationAck && <span className="self-center text-sm font-medium text-blue-700">{rotationAck}</span>}
             </div>
-          </div>
+          </Alert>
         )}
-      </div>
+      </Card>
 
-      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 className="text-lg font-semibold">Rotate an existing key</h2>
-        <p className="mt-2 text-sm text-slate-600">
-          Rotations mint a replacement token while preserving audit history. Configure updated limits or TTL to enforce new
-          policies.
-        </p>
-        <div className="mt-4 grid gap-4 md:grid-cols-3">
-          <label className="flex flex-col text-sm md:col-span-3">
-            <span className="font-medium">Key to rotate</span>
-            <select
+      <Card
+        title="Rotate an existing key"
+        description="Rotations mint a replacement token while preserving audit history. Configure updated limits or TTL to enforce new policies."
+      >
+        <div className="grid gap-6 md:grid-cols-3">
+          <div className="md:col-span-3">
+            <Select
+              label="Key to rotate"
               value={rotateKeyId}
-              onChange={(event) => setRotateKeyId(event.target.value)}
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-            >
-              <option value="">Select key…</option>
-              {keys.map((key) => (
-                <option key={key.id} value={key.id}>
-                  {key.key_prefix} · {renderScope(key.scope)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col text-sm">
-            <span className="font-medium">New rate limit (req/min)</span>
-            <input
-              type="number"
-              value={rotateRateLimit === "" ? "" : rotateRateLimit}
-              onChange={(event) =>
-                setRotateRateLimit(event.target.value === "" ? "" : Number(event.target.value))
-              }
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-              placeholder="Keep existing"
+              onChange={setRotateKeyId}
+              options={[
+                { value: "", label: "Select a key to rotate..." },
+                ...keys.map((key) => ({
+                  value: key.id,
+                  label: `${key.key_prefix} · ${renderScope(key.scope)}`,
+                })),
+              ]}
             />
-          </label>
-          <label className="flex flex-col text-sm">
-            <span className="font-medium">New TTL (hours)</span>
-            <input
-              type="number"
-              value={rotateTtlHours === "" ? "" : rotateTtlHours}
-              onChange={(event) =>
-                setRotateTtlHours(event.target.value === "" ? "" : Number(event.target.value))
-              }
-              className="mt-1 rounded-md border border-slate-300 px-3 py-2 shadow-sm"
-              placeholder="Keep existing"
-            />
-          </label>
+          </div>
+          <Input
+            type="number"
+            label="New Rate Limit (optional)"
+            value={rotateRateLimit === "" ? "" : String(rotateRateLimit)}
+            onChange={(e) => setRotateRateLimit(e.target.value === "" ? "" : Number(e.target.value))}
+            placeholder="Keep existing rate limit"
+          />
+          <Input
+            type="number"
+            label="New TTL in hours (optional)"
+            value={rotateTtlHours === "" ? "" : String(rotateTtlHours)}
+            onChange={(e) => setRotateTtlHours(e.target.value === "" ? "" : Number(e.target.value))}
+            placeholder="Keep existing TTL"
+          />
         </div>
-        <div className="mt-4 flex gap-2">
-          <button
-            type="button"
-            onClick={handleRotate}
-            className="rounded-md border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm"
-          >
-            Rotate key
-          </button>
-          <button
-            type="button"
+        <div className="mt-6 flex gap-3">
+          <Button onClick={handleRotate}>🔄 Rotate Key</Button>
+          <Button
+            variant="ghost"
             onClick={() => {
               setRotateKeyId("");
               setRotateRateLimit("");
               setRotateTtlHours("");
             }}
-            className="rounded-md border border-slate-200 bg-white px-4 py-2 text-sm shadow-sm"
           >
-            Clear form
-          </button>
+            ✕ Clear
+          </Button>
         </div>
-      </div>
+      </Card>
 
-      <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-          <h2 className="text-lg font-semibold">Issued keys</h2>
-          <span className="text-sm text-slate-500">Total {keys.length}</span>
-        </div>
+      <Card
+        title="Issued Keys"
+        actions={<span className="text-base text-slate-600 font-semibold">Total: {keys.length}</span>}
+      >
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50">
@@ -352,7 +325,7 @@ export default function KeysPage() {
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
     </section>
   );
 }
