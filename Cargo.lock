@@ -224,6 +224,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.21.7",
  "bkg-db",
  "cave-kernel",
  "chrono",
@@ -246,11 +247,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.21.7",
  "bkg-db",
  "chrono",
+ "hmac",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

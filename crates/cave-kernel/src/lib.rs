@@ -7,6 +7,7 @@
 //! layered in later; the current runtime is a safe process isolation shim that
 //! operates within a prepared workspace directory.
 
+mod audit;
 mod isolation;
 
 use std::{
@@ -18,6 +19,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use audit::{AuditEvent, AuditLogWriter};
 use bkg_db::{
     self, Database, ExecutionRecord, NewSandbox, ResourceLimits, SandboxError, SandboxRecord,
     SandboxStatus,
@@ -34,6 +36,8 @@ use which::which;
 
 const DEFAULT_RUNTIME_KIND: &str = "process";
 
+pub use audit::AuditConfig;
+
 /// Logical configuration driving the kernel behaviour.
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
@@ -41,6 +45,7 @@ pub struct KernelConfig {
     pub default_limits: ResourceLimits,
     pub default_runtime: String,
     pub isolation: IsolationSettings,
+    pub audit: AuditConfig,
 }
 
 impl KernelConfig {
@@ -57,6 +62,7 @@ impl Default for KernelConfig {
             default_limits: ResourceLimits::default(),
             default_runtime: DEFAULT_RUNTIME_KIND.to_string(),
             isolation: IsolationSettings::default(),
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -92,6 +98,7 @@ where
     runtime: Arc<R>,
     config: KernelConfig,
     instances: Arc<RwLock<HashMap<Uuid, Arc<dyn SandboxInstance>>>>,
+    audit: Option<Arc<AuditLogWriter>>,
 }
 
 impl<R> Clone for CaveKernel<R>
@@ -104,6 +111,7 @@ where
             runtime: self.runtime.clone(),
             config: self.config.clone(),
             instances: self.instances.clone(),
+            audit: self.audit.clone(),
         }
     }
 }
@@ -113,16 +121,41 @@ where
     R: SandboxRuntime,
 {
     pub fn new(db: Database, runtime: R, config: KernelConfig) -> Self {
+        let audit = if config.audit.enabled {
+            match AuditLogWriter::try_new(&config.audit) {
+                Ok(writer) => Some(Arc::new(writer)),
+                Err(err) => {
+                    warn!(error = %err, "failed to initialize audit log writer; disabling audits");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             db,
             runtime: Arc::new(runtime),
             config,
             instances: Arc::new(RwLock::new(HashMap::new())),
+            audit,
         }
     }
 
     pub fn config(&self) -> &KernelConfig {
         &self.config
+    }
+
+    async fn record_audit(&self, event: AuditEvent) {
+        if let Some(writer) = self.audit.clone() {
+            if let Err(err) = writer.append(&event).await {
+                warn!(
+                    sandbox_id = %event.sandbox_id,
+                    error = %err,
+                    "failed to append audit log entry"
+                );
+            }
+        }
     }
 
     /// Creates a sandbox entry and enforces namespace uniqueness.
@@ -152,6 +185,14 @@ where
             .map_err(KernelError::from)?;
 
         info!(sandbox_id = %record.id, namespace = %record.namespace, "sandbox created");
+        self.record_audit(AuditEvent::sandbox_created(
+            record.id,
+            record.namespace.clone(),
+            record.name.clone(),
+            record.runtime.clone(),
+            record.limits(),
+        ))
+        .await;
         Ok(record)
     }
 
@@ -197,6 +238,11 @@ where
                     .map_err(KernelError::from)?
                     .expect("sandbox must exist after start");
                 info!(sandbox_id = %id, "sandbox running");
+                self.record_audit(AuditEvent::sandbox_started(
+                    updated.id,
+                    updated.namespace.clone(),
+                ))
+                .await;
                 Ok(updated)
             }
             Err(err) => {
@@ -230,6 +276,8 @@ where
         let effective_request =
             request.with_default_timeout(Duration::from_secs(record.timeout_seconds as u64));
         let runtime_request = effective_request.clone();
+        let command_for_log = effective_request.command.clone();
+        let args_for_log = effective_request.args.clone();
         let outcome = instance
             .exec(runtime_request)
             .await
@@ -252,13 +300,24 @@ where
             .await
             .map_err(KernelError::from)?;
 
+        self.record_audit(AuditEvent::sandbox_exec(
+            record.id,
+            record.namespace.clone(),
+            command_for_log,
+            args_for_log,
+            outcome.exit_code,
+            outcome.duration_ms(),
+            outcome.timed_out,
+        ))
+        .await;
+
         Ok(outcome)
     }
 
     /// Stops the runtime instance and updates state tracking.
     #[instrument(skip(self))]
     pub async fn stop_sandbox(&self, id: Uuid) -> Result<(), KernelError> {
-        let _record = self
+        let record = self
             .db
             .fetch_sandbox(id)
             .await
@@ -281,6 +340,11 @@ where
             .await
             .map_err(KernelError::from)?;
         info!(sandbox_id = %id, "sandbox stopped");
+        self.record_audit(AuditEvent::sandbox_stopped(
+            record.id,
+            record.namespace.clone(),
+        ))
+        .await;
         Ok(())
     }
 
@@ -310,6 +374,11 @@ where
             .map_err(KernelError::from)?;
 
         info!(sandbox_id = %id, "sandbox deleted");
+        self.record_audit(AuditEvent::sandbox_deleted(
+            record.id,
+            record.namespace.clone(),
+        ))
+        .await;
         Ok(())
     }
 
@@ -743,6 +812,7 @@ mod tests {
         let mut config = KernelConfig::default();
         config.isolation.enable_cgroups = false;
         config.isolation.enable_namespaces = false;
+        config.audit.enabled = false;
         let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
         let kernel = CaveKernel::new(db, runtime, config);
 
@@ -772,5 +842,48 @@ mod tests {
 
         kernel.stop_sandbox(created.id).await.unwrap();
         kernel.delete_sandbox(created.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_lifecycle_events() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut config = KernelConfig::default();
+        config.isolation.enable_cgroups = false;
+        config.isolation.enable_namespaces = false;
+        config.audit.enabled = true;
+        config.audit.log_path =
+            std::env::temp_dir().join(format!("cave-kernel-audit-{}.jsonl", Uuid::new_v4()));
+        config.audit.hmac_key = None;
+        let audit_path = config.audit.log_path.clone();
+
+        let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
+        let kernel = CaveKernel::new(db, runtime, config);
+
+        let created = kernel
+            .create_sandbox(CreateSandboxRequest::new("ns", "audit"))
+            .await
+            .unwrap();
+        kernel.start_sandbox(created.id).await.unwrap();
+        let _ = kernel
+            .exec(
+                created.id,
+                ExecRequest {
+                    command: "echo".into(),
+                    args: vec!["audit".into()],
+                    stdin: None,
+                    timeout: Some(Duration::from_secs(2)),
+                },
+            )
+            .await
+            .unwrap();
+        kernel.stop_sandbox(created.id).await.unwrap();
+        kernel.delete_sandbox(created.id).await.unwrap();
+
+        let contents = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        tokio::fs::remove_file(&audit_path).await.unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.iter().any(|line| line.contains("sandbox_created")));
+        assert!(lines.iter().any(|line| line.contains("sandbox_exec")));
+        assert!(lines.iter().any(|line| line.contains("sandbox_deleted")));
     }
 }

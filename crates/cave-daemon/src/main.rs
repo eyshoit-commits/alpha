@@ -11,10 +11,11 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bkg_db::{Database, ExecutionRecord, ResourceLimits, SandboxRecord};
 use cave_kernel::{
-    CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings, KernelConfig,
-    KernelError, ProcessSandboxRuntime,
+    AuditConfig, CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings,
+    KernelConfig, KernelError, ProcessSandboxRuntime,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,7 @@ struct AppConfig {
     default_runtime: String,
     default_limits: ResourceLimits,
     isolation: IsolationSettings,
+    audit: AuditConfig,
 }
 
 impl AppConfig {
@@ -264,6 +266,34 @@ impl AppConfig {
             }
         }
 
+        let audit_enabled = match bool_env("CAVE_AUDIT_LOG_ENABLED") {
+            Some(value) => value,
+            None => !matches!(bool_env("CAVE_AUDIT_LOG_DISABLED"), Some(true)),
+        };
+        let audit_log_path = env::var("CAVE_AUDIT_LOG_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./logs/audit.jsonl"));
+        let audit_hmac_key = match env::var("CAVE_AUDIT_LOG_HMAC_KEY") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        STANDARD
+                            .decode(trimmed)
+                            .context("invalid base64 in CAVE_AUDIT_LOG_HMAC_KEY")?,
+                    )
+                }
+            }
+            Err(_) => None,
+        };
+        let audit = AuditConfig {
+            enabled: audit_enabled,
+            log_path: audit_log_path,
+            hmac_key: audit_hmac_key,
+        };
+
         Ok(Self {
             listen_addr,
             db_url,
@@ -271,6 +301,7 @@ impl AppConfig {
             default_runtime,
             default_limits,
             isolation,
+            audit,
         })
     }
 }
