@@ -60,7 +60,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## BKG-DB Voll-Stack Aufbau
 - [ ] Kernel & Storage: MVCC, WAL, Checkpoints, Crash-Recovery.  
-  Status: SQLite-Prototyp vorhanden; Modul-Skelett (`kernel.rs`, `storage.rs`) angelegt, MVCC/WAL Implementierung ausstehend.
+  Status: In-Memory Prototype (`InMemoryStorageEngine`) mit WAL-Staging & Tests vorhanden (`crates/bkg-db/src/kernel.rs`); durable WAL/Checkpoints & Recovery stehen aus.
 - [ ] SQL-Pipeline (Parser → Planner → Executor) mit SQL92-Kompatibilität.  
   Status: Platzhaltermodule (`sql.rs`, `planner.rs`, `executor.rs`) vorhanden; Parser/Planner/Executor Logik muss implementiert werden.
 - [ ] Auth/RLS: JWT-Issuer, Policy Engine, Row-Level Security Evaluator.  
