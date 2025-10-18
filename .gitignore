@@ -7,5 +7,10 @@ target/
 *.swp
 *.swo
 
+# Node/Next.js artifacts
+node_modules/
+.next/
+playwright-report/
+
 # Env files
 .env
