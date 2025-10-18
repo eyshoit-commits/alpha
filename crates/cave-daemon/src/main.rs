@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         default_runtime: config.default_runtime.clone(),
         default_limits: config.default_limits,
         isolation: config.isolation.clone(),
+        audit: config.audit.clone(),
     };
 
     let runtime = ProcessSandboxRuntime::new(kernel_cfg.isolation.clone())
@@ -915,13 +916,7 @@ fn bool_env(key: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::auth::{AuthService, KeyScope};
     use super::*;
-    use axum::body::{to_bytes, Body};
-    use axum::http::Request;
-    use serde_json::json;
-    use tempfile::TempDir;
-    use tower::Service;
 
     #[test]
     fn limit_conversion_roundtrip() {
