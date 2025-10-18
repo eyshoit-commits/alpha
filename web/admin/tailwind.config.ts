@@ -40,6 +40,7 @@ const config: Config = {
           orange: '#EC5800',
           purple: '#AF75FF',
           mint: '#75ffaf',
+          border: '#5bec92',
         },
         blue: {
           50: '#eff6ff',
