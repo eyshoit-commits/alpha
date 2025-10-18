@@ -104,7 +104,11 @@ impl Database {
         })?;
 
         self.fetch_sandbox(id).await?.ok_or_else(|| {
-            anyhow!("sandbox inserted but missing when reloaded (namespace={}, name={})", data.namespace, data.name)
+            anyhow!(
+                "sandbox inserted but missing when reloaded (namespace={}, name={})",
+                data.namespace,
+                data.name
+            )
         })
     }
 
@@ -120,9 +124,10 @@ impl Database {
 
     /// Lists all sandboxes within a namespace ordered by creation time descending.
     pub async fn list_sandboxes(&self, namespace: &str) -> Result<Vec<SandboxRecord>> {
-        let mut rows = sqlx::query("SELECT * FROM sandboxes WHERE namespace = ? ORDER BY created_at DESC")
-            .bind(namespace)
-            .fetch(&self.pool);
+        let mut rows =
+            sqlx::query("SELECT * FROM sandboxes WHERE namespace = ? ORDER BY created_at DESC")
+                .bind(namespace)
+                .fetch(&self.pool);
 
         let mut out = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -217,7 +222,11 @@ impl Database {
     }
 
     /// Returns the most recent execution events for a sandbox.
-    pub async fn list_executions(&self, sandbox_id: Uuid, limit: u32) -> Result<Vec<ExecutionRecord>> {
+    pub async fn list_executions(
+        &self,
+        sandbox_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ExecutionRecord>> {
         let mut rows = sqlx::query(
             r#"
             SELECT * FROM sandbox_executions
@@ -337,7 +346,12 @@ pub struct NewSandbox<'a> {
 }
 
 impl<'a> NewSandbox<'a> {
-    pub fn with_limits(namespace: &'a str, name: &'a str, runtime: &'a str, limits: ResourceLimits) -> Self {
+    pub fn with_limits(
+        namespace: &'a str,
+        name: &'a str,
+        runtime: &'a str,
+        limits: ResourceLimits,
+    ) -> Self {
         Self {
             namespace,
             name,
@@ -551,10 +565,7 @@ mod tests {
 
         db.record_execution(entry.clone()).await.unwrap();
 
-        let entries = db
-            .list_executions(sandbox.id, 10)
-            .await
-            .unwrap();
+        let entries = db.list_executions(sandbox.id, 10).await.unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].stdout, entry.stdout);

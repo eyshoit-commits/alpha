@@ -7,11 +7,19 @@
 //! layered in later; the current runtime is a safe process isolation shim that
 //! operates within a prepared workspace directory.
 
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bkg_db::{self, Database, ExecutionRecord, NewSandbox, ResourceLimits, SandboxError, SandboxRecord, SandboxStatus};
+use bkg_db::{
+    self, Database, ExecutionRecord, NewSandbox, ResourceLimits, SandboxError, SandboxRecord,
+    SandboxStatus,
+};
 use chrono::Utc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -85,10 +93,19 @@ where
         }
     }
 
+    pub fn config(&self) -> &KernelConfig {
+        &self.config
+    }
+
     /// Creates a sandbox entry and enforces namespace uniqueness.
     #[instrument(skip(self, request))]
-    pub async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxRecord, KernelError> {
-        let limits = request.resource_limits.unwrap_or(self.config.default_limits);
+    pub async fn create_sandbox(
+        &self,
+        request: CreateSandboxRequest,
+    ) -> Result<SandboxRecord, KernelError> {
+        let limits = request
+            .resource_limits
+            .unwrap_or(self.config.default_limits);
         let runtime = request
             .runtime
             .as_deref()
@@ -182,7 +199,8 @@ where
             .cloned()
             .ok_or(KernelError::NotRunning(id))?;
 
-        let effective_request = request.with_default_timeout(Duration::from_secs(record.timeout_seconds as u64));
+        let effective_request =
+            request.with_default_timeout(Duration::from_secs(record.timeout_seconds as u64));
         let runtime_request = effective_request.clone();
         let outcome = instance
             .exec(runtime_request)
@@ -258,7 +276,10 @@ where
             .await
             .map_err(KernelError::Runtime)?;
 
-        self.db.delete_sandbox(id).await.map_err(KernelError::from)?;
+        self.db
+            .delete_sandbox(id)
+            .await
+            .map_err(KernelError::from)?;
 
         info!(sandbox_id = %id, "sandbox deleted");
         Ok(())
@@ -274,7 +295,11 @@ where
     }
 
     /// Fetches the most recent execution audit entries.
-    pub async fn recent_executions(&self, id: Uuid, limit: u32) -> Result<Vec<ExecutionRecord>, KernelError> {
+    pub async fn recent_executions(
+        &self,
+        id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<ExecutionRecord>, KernelError> {
         let _ = self
             .db
             .fetch_sandbox(id)
@@ -381,7 +406,11 @@ impl ExecOutcome {
 
 #[async_trait]
 pub trait SandboxRuntime: Send + Sync + 'static {
-    async fn spawn(&self, sandbox: &SandboxRecord, workspace: &Path) -> Result<Arc<dyn SandboxInstance>>;
+    async fn spawn(
+        &self,
+        sandbox: &SandboxRecord,
+        workspace: &Path,
+    ) -> Result<Arc<dyn SandboxInstance>>;
     async fn destroy(&self, sandbox_id: Uuid, workspace: &Path) -> Result<()>;
 }
 
@@ -397,9 +426,14 @@ pub struct ProcessSandboxRuntime;
 
 #[async_trait]
 impl SandboxRuntime for ProcessSandboxRuntime {
-    async fn spawn(&self, sandbox: &SandboxRecord, workspace: &Path) -> Result<Arc<dyn SandboxInstance>> {
+    async fn spawn(
+        &self,
+        sandbox: &SandboxRecord,
+        workspace: &Path,
+    ) -> Result<Arc<dyn SandboxInstance>> {
         fs::create_dir_all(workspace).await?;
-        let instance = ProcessSandboxInstance::new(sandbox.id, workspace.to_path_buf(), sandbox.limits());
+        let instance =
+            ProcessSandboxInstance::new(sandbox.id, workspace.to_path_buf(), sandbox.limits());
         Ok(Arc::new(instance))
     }
 

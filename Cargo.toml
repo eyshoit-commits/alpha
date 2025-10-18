@@ -30,7 +30,7 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 parking_lot = "0.12"
 axum = { version = "0.7", features = ["macros", "json"] }
 tower = "0.4"
-tower-http = { version = "0.4", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace"] }
 hyper = { version = "1", features = ["full"] }
 futures = "0.3"
 
