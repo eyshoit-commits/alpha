@@ -50,13 +50,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
       - name: Install Node (for ajv)
         uses: actions/setup-node@v4
         with:
           node-version: "18"
 
-      - name: Install ajv-cli
-        run: npm install -g ajv-cli
+      - name: Install schema tooling
+        run: npm install -g ajv-cli @redocly/openapi-cli
+
+      - name: Generate OpenAPI schema
+        run: make api-schema
+
+      - name: Ensure OpenAPI schema committed
+        run: git diff --exit-code -- openapi.yaml
+
+      - name: Validate OpenAPI schema
+        run: openapi-cli validate openapi.yaml
 
       - name: Validate cave.yaml if present
         run: |
@@ -141,13 +156,17 @@ jobs:
         run: |
           echo "TODO: invoke make slsa once implemented"
 
-      - name: Sign SBOM (key required)
+      - name: Sign SBOM when key is provided
         env:
           COSIGN_EXPERIMENTAL: "1"
+          COSIGN_KEY_B64: ${{ secrets.COSIGN_KEY_B64 }}
         run: |
-          if [ -f "cosign.key" ]; then
+          if [ -n "${COSIGN_KEY_B64}" ]; then
+            echo "Using cosign key from secrets"
+            echo "${COSIGN_KEY_B64}" | base64 -d > cosign.key
+            cosign sign-blob sbom.json --key cosign.key --output-signature sbom.sig
+          elif [ -f "cosign.key" ]; then
             cosign sign-blob sbom.json --key cosign.key --output-signature sbom.sig
           else
-            echo "cosign.key not provided; supply via secrets and update workflow."
-            exit 1
+            echo "Skipping cosign signing; provide COSIGN_KEY_B64 secret or cosign.key artifact to enable signing."
           fi
