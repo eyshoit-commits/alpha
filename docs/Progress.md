@@ -62,7 +62,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] Kernel & Storage: MVCC, WAL, Checkpoints, Crash-Recovery.  
   Status: In-Memory Prototype (`InMemoryStorageEngine`) mit WAL-Staging & Tests vorhanden (`crates/bkg-db/src/kernel.rs`); durable WAL/Checkpoints & Recovery stehen aus.
 - [ ] SQL-Pipeline (Parser → Planner → Executor) mit SQL92-Kompatibilität.  
-  Status: Platzhaltermodule (`sql.rs`, `planner.rs`, `executor.rs`) vorhanden; Parser/Planner/Executor Logik muss implementiert werden.
+  Status: Parser (sqlparser), Planner und einfacher Executor für INSERT/SELECT implementiert (`crates/bkg-db/src/sql.rs`, `planner.rs`, `executor.rs`); Unterstützung für Joins/Aggregationen/Filter steht aus.
 - [ ] Auth/RLS: JWT-Issuer, Policy Engine, Row-Level Security Evaluator.  
   Status: API-Key Persistenz via `api_keys` Tabelle vorhanden; JWT/RLS Engine weiterhin offen (`docs/bkg-db.md`).
 - [ ] Postgres/RLS Migration entwerfen (Wechsel von SQLite-Prototyp zu Postgres mit Policies & Seeds).  
