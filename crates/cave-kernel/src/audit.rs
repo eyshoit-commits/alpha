@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 use uuid::Uuid;
@@ -81,15 +81,11 @@ impl AuditLogWriter {
             None => None,
         };
 
-        #[derive(Serialize)]
-        struct AuditLine<'a> {
-            #[serde(flatten)]
-            event: &'a AuditEvent,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            signature: Option<String>,
-        }
+        let line = AuditLogLine {
+            event: event.clone(),
+            signature,
+        };
 
-        let line = AuditLine { event, signature };
         let encoded = serde_json::to_vec(&line).context("serializing audit line")?;
         file.write_all(&encoded).await?;
         file.write_all(b"\n").await?;
@@ -97,7 +93,7 @@ impl AuditLogWriter {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
     pub sandbox_id: Uuid,
@@ -106,7 +102,7 @@ pub struct AuditEvent {
     pub kind: AuditEventKind,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum AuditEventKind {
     #[serde(rename = "sandbox_created")]
@@ -129,6 +125,39 @@ pub enum AuditEventKind {
     Stopped,
     #[serde(rename = "sandbox_deleted")]
     Deleted,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AuditLogLine {
+    #[serde(flatten)]
+    event: AuditEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+}
+
+pub fn verify_signed_line(line: &str, key: &[u8]) -> Result<AuditEvent> {
+    if key.is_empty() {
+        return Err(anyhow::anyhow!("audit verification key is empty"));
+    }
+
+    let parsed: AuditLogLine =
+        serde_json::from_str(line).context("parsing audit log line for verification")?;
+    let signature = parsed
+        .signature
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("audit log line missing signature"))?;
+    let signature_bytes = STANDARD_NO_PAD
+        .decode(signature)
+        .context("decoding audit log signature")?;
+
+    let mut mac = HmacSha256::new_from_slice(key).context("initializing HMAC for verification")?;
+    let payload =
+        serde_json::to_vec(&parsed.event).context("serializing audit event for verification")?;
+    mac.update(&payload);
+    mac.verify_slice(&signature_bytes)
+        .context("audit log signature mismatch")?;
+
+    Ok(parsed.event)
 }
 
 impl AuditEvent {
@@ -223,15 +252,9 @@ mod tests {
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         tokio::fs::remove_file(&path).await.unwrap();
         let line = contents.lines().next().unwrap();
-        let value: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(value.get("type").unwrap(), "sandbox_started");
-
-        let signature = value.get("signature").and_then(|v| v.as_str()).unwrap();
-        let mut mac = HmacSha256::new_from_slice(b"super-secret").unwrap();
-        let payload = serde_json::to_vec(&event).unwrap();
-        mac.update(&payload);
-        let expected = STANDARD_NO_PAD.encode(mac.finalize().into_bytes());
-        assert_eq!(signature, expected);
+        let parsed = verify_signed_line(line, b"super-secret").unwrap();
+        assert_eq!(parsed.kind, AuditEventKind::Started);
+        assert_eq!(parsed.sandbox_id, event.sandbox_id);
     }
 
     #[tokio::test]
@@ -250,7 +273,7 @@ mod tests {
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         tokio::fs::remove_file(&path).await.unwrap();
         let line = contents.lines().next().unwrap();
-        let value: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert!(value.get("signature").is_none());
+        let value: AuditLogLine = serde_json::from_str(line).unwrap();
+        assert!(value.signature.is_none());
     }
 }

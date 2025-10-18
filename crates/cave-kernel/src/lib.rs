@@ -33,7 +33,8 @@ use bkg_db::{
 use chrono::Utc;
 use isolation::{
     add_pid_to_cgroup, apply_seccomp_filter, cleanup_cgroup, cleanup_overlay_dirs, mount_overlay,
-    prepare_cgroup, prepare_overlay_dirs, resolve_seccomp_numbers, unmount_overlay, OverlayDirs,
+    prepare_cgroup, prepare_overlay_dirs, resolve_seccomp_numbers, unmount_overlay,
+    BubblewrapProfile, OverlayDirs,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -45,7 +46,7 @@ use which::which;
 
 const DEFAULT_RUNTIME_KIND: &str = "process";
 
-pub use audit::AuditConfig;
+pub use audit::{verify_signed_line, AuditConfig, AuditEvent, AuditEventKind};
 
 /// Logical configuration driving the kernel behaviour.
 #[derive(Debug, Clone)]
@@ -84,6 +85,7 @@ pub struct IsolationSettings {
     pub enable_overlayfs: bool,
     pub enable_seccomp: bool,
     pub bubblewrap_path: Option<PathBuf>,
+    pub bubblewrap: BubblewrapProfile,
     pub cgroup_root: Option<PathBuf>,
     pub seccomp_profile_path: Option<PathBuf>,
     pub seccomp_allow_syscalls: Vec<String>,
@@ -100,6 +102,7 @@ impl Default for IsolationSettings {
             enable_overlayfs: cfg!(target_os = "linux"),
             enable_seccomp: cfg!(target_os = "linux"),
             bubblewrap_path: None,
+            bubblewrap: BubblewrapProfile::default(),
             cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/bkg")),
             seccomp_profile_path: None,
             seccomp_allow_syscalls: Vec::new(),
@@ -608,16 +611,10 @@ impl ProcessSandboxRuntime {
             None => None,
         };
 
-        let (seccomp_allowlist, seccomp_numbers) = if isolation.enable_seccomp {
-            let allowlist = Arc::new(build_seccomp_allowlist(&isolation));
-            let numbers = resolve_seccomp_numbers(allowlist.as_ref())
+        if isolation.enable_seccomp && !isolation.seccomp_allow_syscalls.is_empty() {
+            resolve_seccomp_numbers(&isolation.seccomp_allow_syscalls)
                 .with_context(|| "resolving seccomp allowlist to numeric identifiers")?;
-            (Some(allowlist), Some(Arc::new(numbers)))
-        } else {
-            (None, None)
-        };
-
-        let seccomp_profile_path = isolation.seccomp_profile_path.clone();
+        }
 
         let inner = ProcessRuntimeInner {
             isolation,
@@ -810,6 +807,8 @@ impl SandboxInstance for ProcessSandboxInstance {
                     &self.workspace_root,
                     &execution_root,
                     self.sandbox_id,
+                    &self.runtime.isolation.bubblewrap,
+                    self.runtime.isolation.seccomp_profile_path.as_deref(),
                 )
             } else {
                 build_plain_command(
@@ -1265,36 +1264,59 @@ fn build_bubblewrap_command(
     workspace_root: &Path,
     execution_root: &Path,
     sandbox_id: Uuid,
-    seccomp_profile: Option<&Path>,
+    profile: &BubblewrapProfile,
+    fallback_seccomp_profile: Option<&Path>,
 ) -> Command {
     let mut command = Command::new(bwrap_path);
     command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
     command.arg("--die-with-parent");
     command.arg("--new-session");
-    command.arg("--unshare-pid");
-    command.arg("--unshare-uts");
-    command.arg("--unshare-ipc");
-    command.arg("--unshare-net");
-    command.arg("--unshare-cgroup");
-    command.arg("--proc").arg("/proc");
 
-    for path in ro_bind_candidates() {
-        if std::path::Path::new(path).exists() {
+    for flag in profile.namespace_flags() {
+        command.arg(flag);
+    }
+
+    if let Some(uid) = profile.uid() {
+        command.arg("--uid").arg(uid.to_string());
+    }
+
+    if let Some(gid) = profile.gid() {
+        command.arg("--gid").arg(gid.to_string());
+    }
+
+    command.arg("--proc").arg(profile.proc_path());
+
+    for cap in profile.drop_capabilities() {
+        command.arg("--cap-drop").arg(cap);
+    }
+
+    for path in profile.readonly_paths() {
+        if path.exists() {
             command.arg("--ro-bind").arg(path).arg(path);
         }
     }
 
-    command.arg("--dev-bind").arg("/dev").arg("/dev");
+    for path in profile.device_paths() {
+        if path.exists() {
+            command.arg("--dev-bind").arg(path).arg(path);
+        }
+    }
+
     command
         .arg("--bind")
         .arg(execution_root)
         .arg(workspace_root);
     command.arg("--chdir").arg(workspace_root);
-    command.arg("--tmpfs").arg("/tmp");
+
+    for path in profile.tmpfs_paths() {
+        command.arg("--tmpfs").arg(path);
+    }
+
     command
         .arg("--setenv")
         .arg("PATH")
         .arg("/usr/bin:/bin:/sbin");
+    command.arg("--setenv").arg("HOME").arg(workspace_root);
     command
         .arg("--setenv")
         .arg("BKG_SANDBOX_ID")
@@ -1308,18 +1330,14 @@ fn build_bubblewrap_command(
         .arg("BKG_SANDBOX_ROOT")
         .arg(workspace_root);
 
-    if let Some(profile) = seccomp_profile {
-        command.arg("--seccomp").arg(profile);
+    if let Some(profile_path) = profile.seccomp_profile().or(fallback_seccomp_profile) {
+        command.arg("--seccomp").arg(profile_path);
     }
 
     command.arg("--");
     command.arg(&request.command);
     command.args(&request.args);
     command
-}
-
-fn ro_bind_candidates() -> &'static [&'static str] {
-    &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
 }
 
 fn sanitize_component(input: &str) -> String {

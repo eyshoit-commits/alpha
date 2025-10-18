@@ -19,17 +19,37 @@ target_startup_ms = 200       # Ziel: <200ms Startup-Zeit (vgl. Microsandbox Qui
 engine = "MicroVM"            # Persistente Micro-VM für längere Sessions  
 snapshot_support = true       # Unterstützung für Snapshots/Backtracking in Persistent Mode  
 
-[security]  
-enable_namespaces = true      # Linux-Namespaces zur Isolierung aktivieren (Prozess, Netzwerk, etc.)  
-enable_seccomp = true         # Seccomp Filter aktiv (Standard-Profil, verbietet unsichere Syscalls)  
-cgroups_v2 = true             # Ressourcenbegrenzung via cgroups v2 durchsetzen (für CPU/RAM)  
-sandbox_fs_overlay = true     # Schreibvorgänge nur auf überlagertem FS (kein direkter Host-FS-Zugriff)  
-allow_dev_mode = false        # Kein unsicherer Dev-Modus in produktiven Umgebungen (z.B. always false in Prod)  
+[security]
+enable_namespaces = true      # Linux-Namespaces zur Isolierung aktivieren (Prozess, Netzwerk, etc.)
+enable_seccomp = true         # Seccomp Filter aktiv (Standard-Profil, verbietet unsichere Syscalls)
+cgroups_v2 = true             # Ressourcenbegrenzung via cgroups v2 durchsetzen (für CPU/RAM)
+sandbox_fs_overlay = true     # Schreibvorgänge nur auf überlagertem FS (kein direkter Host-FS-Zugriff)
+allow_dev_mode = false        # Kein unsicherer Dev-Modus in produktiven Umgebungen (z.B. always false in Prod)
 
-[logging]  
-audit_to_db = true            # Aktionen der Sandbox ins Audit-Log der DB schreiben (`audit_events` Tabelle):contentReference[oaicite:23]{index=23}  
-audit_to_file = true          # Zusätzlich lokales Audit-Log schreiben (z.B. `/var/log/bkg/sandbox_audit.jsonl`)  
-log_format = "jsonl"          # Format: JSON Lines, append-only (für manipulationssichere Audit-Trails)  
+[security.bubblewrap]
+binary = "/usr/bin/bwrap"                # Vollständiger Pfad zur Bubblewrap-Binary
+unshare = ["user", "pid", "ipc", "uts", "net", "cgroup"]
+                                        # Welche Namespaces beim Start getrennt werden
+drop_capabilities = ["CAP_AUDIT_CONTROL", "CAP_AUDIT_WRITE", "CAP_KILL", "CAP_MKNOD",
+    "CAP_NET_ADMIN", "CAP_NET_BIND_SERVICE", "CAP_NET_BROADCAST", "CAP_NET_RAW",
+    "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_MODULE", "CAP_SYS_PTRACE",
+    "CAP_SYSLOG", "CAP_SYS_TIME", "CAP_SYS_TTY_CONFIG", "CAP_MAC_ADMIN",
+    "CAP_SETFCAP", "CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"]
+                                        # Fähigkeiten, die in der Sandbox entzogen werden
+readonly_paths = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+                                        # Host-Verzeichnisse, die nur lesbar eingebunden werden
+dev_bind = ["/dev"]                     # Gerätezugriffe, die explizit erlaubt bleiben
+tmpfs_mounts = ["/tmp", "/run", "/var/tmp"]
+                                        # Pfade, die als flüchtige tmpfs zur Verfügung stehen
+uid = 65534                              # UID/GID, unter der Befehle in der Sandbox laufen (Standard: nobody)
+gid = 65534
+proc_path = "/proc"                     # Pfad für ein isoliertes /proc
+seccomp_profile = ""                    # Optionaler Pfad zu einer Bubblewrap-Seccomp-Policy (JSON)
+
+[logging]
+audit_to_db = true            # Aktionen der Sandbox ins Audit-Log der DB schreiben (`audit_events` Tabelle):contentReference[oaicite:23]{index=23}
+audit_to_file = true          # Zusätzlich lokales Audit-Log schreiben (z.B. `/var/log/bkg/sandbox_audit.jsonl`)
+log_format = "jsonl"          # Format: JSON Lines, append-only (für manipulationssichere Audit-Trails)
 scrub_pii = true              # Sensible Daten (PII, Secrets) aus Sandbox-Logs entfernen (siehe `BKG_SCRUB_LOGS`)  
 
 [telemetry]  
