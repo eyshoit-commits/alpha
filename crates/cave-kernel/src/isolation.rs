@@ -19,6 +19,154 @@ use crate::ResourceLimits;
 #[cfg(target_os = "linux")]
 use tracing::warn;
 
+/// Namespaces that can be unshared inside the Bubblewrap profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubblewrapNamespace {
+    User,
+    Pid,
+    Ipc,
+    Uts,
+    Net,
+    Cgroup,
+}
+
+impl BubblewrapNamespace {
+    pub fn flag(self) -> &'static str {
+        match self {
+            BubblewrapNamespace::User => "--unshare-user",
+            BubblewrapNamespace::Pid => "--unshare-pid",
+            BubblewrapNamespace::Ipc => "--unshare-ipc",
+            BubblewrapNamespace::Uts => "--unshare-uts",
+            BubblewrapNamespace::Net => "--unshare-net",
+            BubblewrapNamespace::Cgroup => "--unshare-cgroup",
+        }
+    }
+}
+
+const DEFAULT_BUBBLEWRAP_DROP_CAPABILITIES: &[&str] = &[
+    "CAP_AUDIT_CONTROL",
+    "CAP_AUDIT_WRITE",
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_KILL",
+    "CAP_LEASE",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_MAC_ADMIN",
+    "CAP_MKNOD",
+    "CAP_NET_ADMIN",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_RAW",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_NICE",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+];
+
+const DEFAULT_BUBBLEWRAP_RO_PATHS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+const DEFAULT_BUBBLEWRAP_DEV_PATHS: &[&str] = &["/dev"];
+const DEFAULT_BUBBLEWRAP_TMPFS: &[&str] = &["/tmp", "/run", "/var/tmp"];
+
+/// Declarative Bubblewrap profile used when launching sandboxed processes.
+#[derive(Debug, Clone)]
+pub struct BubblewrapProfile {
+    pub unshare_namespaces: Vec<BubblewrapNamespace>,
+    pub drop_capabilities: Vec<String>,
+    pub readonly_bind_paths: Vec<PathBuf>,
+    pub dev_bind_paths: Vec<PathBuf>,
+    pub tmpfs_paths: Vec<PathBuf>,
+    pub proc_path: PathBuf,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub seccomp_profile: Option<PathBuf>,
+}
+
+impl Default for BubblewrapProfile {
+    fn default() -> Self {
+        Self {
+            unshare_namespaces: vec![
+                BubblewrapNamespace::User,
+                BubblewrapNamespace::Pid,
+                BubblewrapNamespace::Ipc,
+                BubblewrapNamespace::Uts,
+                BubblewrapNamespace::Net,
+                BubblewrapNamespace::Cgroup,
+            ],
+            drop_capabilities: DEFAULT_BUBBLEWRAP_DROP_CAPABILITIES
+                .iter()
+                .map(|cap| cap.to_string())
+                .collect(),
+            readonly_bind_paths: DEFAULT_BUBBLEWRAP_RO_PATHS
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            dev_bind_paths: DEFAULT_BUBBLEWRAP_DEV_PATHS
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            tmpfs_paths: DEFAULT_BUBBLEWRAP_TMPFS.iter().map(PathBuf::from).collect(),
+            proc_path: PathBuf::from("/proc"),
+            uid: Some(65_534),
+            gid: Some(65_534),
+            seccomp_profile: None,
+        }
+    }
+}
+
+impl BubblewrapProfile {
+    pub fn namespace_flags(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.unshare_namespaces.iter().map(|ns| ns.flag())
+    }
+
+    pub fn drop_capabilities(&self) -> impl Iterator<Item = &str> + '_ {
+        self.drop_capabilities.iter().map(|cap| cap.as_str())
+    }
+
+    pub fn readonly_paths(&self) -> impl Iterator<Item = &Path> + '_ {
+        self.readonly_bind_paths.iter().map(PathBuf::as_path)
+    }
+
+    pub fn device_paths(&self) -> impl Iterator<Item = &Path> + '_ {
+        self.dev_bind_paths.iter().map(PathBuf::as_path)
+    }
+
+    pub fn tmpfs_paths(&self) -> impl Iterator<Item = &Path> + '_ {
+        self.tmpfs_paths.iter().map(PathBuf::as_path)
+    }
+
+    pub fn proc_path(&self) -> &Path {
+        &self.proc_path
+    }
+
+    pub fn uid(&self) -> Option<u32> {
+        self.uid
+    }
+
+    pub fn gid(&self) -> Option<u32> {
+        self.gid
+    }
+
+    pub fn seccomp_profile(&self) -> Option<&Path> {
+        self.seccomp_profile.as_deref()
+    }
+}
+
 #[cfg(target_os = "linux")]
 const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
 #[cfg(target_os = "linux")]
@@ -309,11 +457,12 @@ pub fn mount_overlay(dirs: &OverlayDirs) -> Result<()> {
     let fstype = CString::new("overlay")?;
 
     unsafe {
+        let flags = libc::MS_NODEV | libc::MS_NOSUID;
         if libc::mount(
             source.as_ptr(),
             merged.as_ptr(),
             fstype.as_ptr(),
-            0,
+            flags as libc::c_ulong,
             opts.as_ptr() as *const libc::c_void,
         ) != 0
         {
