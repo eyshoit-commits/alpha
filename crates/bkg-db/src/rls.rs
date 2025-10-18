@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::auth::TokenClaims;
+use crate::{auth::TokenClaims, Database};
 
 /// Representation of a stored RLS policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,9 +20,10 @@ pub struct RlsPolicy {
 }
 
 /// Policy engine contract applied before query execution.
-pub trait RlsPolicyEngine {
+#[async_trait]
+pub trait RlsPolicyEngine: Send + Sync {
     fn evaluate(&self, policy: &RlsPolicy, claims: &TokenClaims, row: &Value) -> Result<bool>;
-    fn policies_for_table(&self, table: &str) -> Result<Vec<RlsPolicy>>;
+    async fn policies_for_table(&self, table: &str) -> Result<Vec<RlsPolicy>>;
 }
 
 /// In-memory policy engine used during development/tests.
@@ -43,13 +45,41 @@ impl InMemoryPolicyEngine {
     }
 }
 
+#[async_trait]
 impl RlsPolicyEngine for InMemoryPolicyEngine {
     fn evaluate(&self, policy: &RlsPolicy, claims: &TokenClaims, row: &Value) -> Result<bool> {
         evaluate_expression(&policy.expression, claims, row)
     }
 
-    fn policies_for_table(&self, table: &str) -> Result<Vec<RlsPolicy>> {
+    async fn policies_for_table(&self, table: &str) -> Result<Vec<RlsPolicy>> {
         Ok(self.policies.get(table).cloned().unwrap_or_default())
+    }
+}
+
+/// Policy engine backed by the persistent database.
+#[derive(Clone)]
+pub struct DatabasePolicyEngine {
+    database: Database,
+}
+
+impl DatabasePolicyEngine {
+    pub fn new(database: Database) -> Self {
+        Self { database }
+    }
+}
+
+#[async_trait]
+impl RlsPolicyEngine for DatabasePolicyEngine {
+    fn evaluate(&self, policy: &RlsPolicy, claims: &TokenClaims, row: &Value) -> Result<bool> {
+        evaluate_expression(&policy.expression, claims, row)
+    }
+
+    async fn policies_for_table(&self, table: &str) -> Result<Vec<RlsPolicy>> {
+        let records = self.database.list_rls_policies(Some(table)).await?;
+        Ok(records
+            .into_iter()
+            .map(|record| record.to_engine_policy())
+            .collect())
     }
 }
 

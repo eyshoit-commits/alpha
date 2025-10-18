@@ -69,8 +69,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: In-Memory Prototype (`InMemoryStorageEngine`) mit WAL-Staging & Tests vorhanden (`crates/bkg-db/src/kernel.rs`); durable WAL/Checkpoints & Recovery stehen aus.
 - [ ] SQL-Pipeline (Parser → Planner → Executor) mit SQL92-Kompatibilität.  
   Status: Parser (sqlparser), Planner und Executor unterstützen `INSERT`, `SELECT *` mit `WHERE`-Filtern (AND/OR, Vergleichs-Operatoren), `SELECT COUNT(*)`, sowie `UPDATE`/`DELETE` inkl. WAL-Logging (`crates/bkg-db/src/sql.rs`, `planner.rs`, `executor.rs`). Joins, Aggregationen jenseits von COUNT(*) und komplexere Optimierungen sind offen.
-- [ ] Auth/RLS: JWT-Issuer, Policy Engine, Row-Level Security Evaluator.  
-  Status: HMAC-basierter JWT Issuer/Validator (`JwtHmacAuth`) implementiert; In-Memory RLS Policy Engine unterstützt einfache EQ/AND/OR Expressions (`crates/bkg-db/src/auth.rs`, `rls.rs`). Persistente Policy-Speicherung & erweiterte Claims/Expressions stehen aus.
+- [ ] Auth/RLS: JWT-Issuer, Policy Engine, Row-Level Security Evaluator.
+  Status: HMAC-basierter JWT Issuer/Validator (`JwtHmacAuth`) implementiert; `DatabasePolicyEngine` lädt Postgres-Policies und enforced Claims im Planner/Executor (`crates/bkg-db/src/rls.rs`, `crates/bkg-db/src/executor.rs`, `crates/bkg-db/src/api.rs`). Erweiterte Expressions, Admin-UI Hooks und Daemon-Wiring stehen aus.
 - [ ] Postgres/RLS Migration entwerfen (Wechsel von SQLite-Prototyp zu Postgres mit Policies & Seeds).  
   Status: Konzept ausstehend; Migration-Tooling/Docs fehlen (`docs/bkg-db.md`).
 - [ ] API-Layer: HTTP (`/query`, `/auth`, `/policy`, `/schema`), pgwire, gRPC.  
