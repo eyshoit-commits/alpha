@@ -72,10 +72,10 @@ test("admin can create and review sandboxes", async ({ page }) => {
     });
   });
 
-  await page.goto("/sandboxes");
-
+  await page.goto("/auth/token?returnTo=/sandboxes");
   await page.getByLabel("Daemon API token").fill("admin-token");
   await page.getByRole("button", { name: "Save token" }).click();
+  await page.waitForURL(/\/sandboxes$/);
 
   await page.getByLabel("Sandbox name").fill("ci-runner");
   await page.getByRole("button", { name: "Create sandbox" }).click();

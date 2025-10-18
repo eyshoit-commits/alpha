@@ -124,21 +124,24 @@ export default function SandboxesPage() {
     }
   };
 
-  const loadExecutions = async (id: string) => {
-    if (!client) return;
-    try {
-      const history = await client.listExecutions(id, 10);
-      setExecutions((prev) => ({ ...prev, [id]: history }));
-    } catch (err) {
-      setError(extractErrorMessage(err));
-    }
-  };
+  const loadExecutions = useCallback(
+    async (id: string) => {
+      if (!client) return;
+      try {
+        const history = await client.listExecutions(id, 10);
+        setExecutions((prev) => ({ ...prev, [id]: history }));
+      } catch (err) {
+        setError(extractErrorMessage(err));
+      }
+    },
+    [client],
+  );
 
   useEffect(() => {
     if (selectedId) {
       void loadExecutions(selectedId);
     }
-  }, [selectedId]);
+  }, [selectedId, loadExecutions]);
 
   return (
     <section className="space-y-6">

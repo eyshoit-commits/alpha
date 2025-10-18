@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
+import { deleteTokenCookie, NAMESPACE_TOKEN_COOKIE, writeTokenCookie } from "@shared/auth";
 
 type TokenContextValue = {
   token: string;
@@ -8,29 +9,22 @@ type TokenContextValue = {
 };
 
 const TokenContext = createContext<TokenContextValue | undefined>(undefined);
-const STORAGE_KEY = "namespace-daemon-token";
 
-export function TokenProvider({ children }: { children: React.ReactNode }) {
-  const [token, setTokenState] = useState("");
+interface TokenProviderProps {
+  children: React.ReactNode;
+  initialToken?: string;
+}
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const stored = window.sessionStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      setTokenState(stored);
-    }
-  }, []);
+export function TokenProvider({ children, initialToken = "" }: TokenProviderProps) {
+  const [token, setTokenState] = useState(initialToken);
 
   const setToken = (value: string) => {
-    setTokenState(value);
-    if (typeof window !== "undefined") {
-      if (value) {
-        window.sessionStorage.setItem(STORAGE_KEY, value);
-      } else {
-        window.sessionStorage.removeItem(STORAGE_KEY);
-      }
+    const next = value.trim();
+    setTokenState(next);
+    if (next) {
+      writeTokenCookie(NAMESPACE_TOKEN_COOKIE, next);
+    } else {
+      deleteTokenCookie(NAMESPACE_TOKEN_COOKIE);
     }
   };
 

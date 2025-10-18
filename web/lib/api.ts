@@ -98,6 +98,71 @@ export interface RotatedKeyResponse {
   webhook: RotationWebhookResponse;
 }
 
+export type ModelStage =
+  | "unknown"
+  | "registered"
+  | "queued"
+  | "downloading"
+  | "verifying"
+  | "ready"
+  | "failed";
+
+export interface ModelRecord {
+  id: string;
+  name: string;
+  provider: string;
+  version: string;
+  format: string;
+  source_uri: string;
+  size_bytes?: number | null;
+  checksum_sha256?: string | null;
+  stage: ModelStage;
+  last_synced_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  tags?: string[];
+  error_message?: string | null;
+}
+
+export interface RegisterModelPayload {
+  name: string;
+  provider: string;
+  version: string;
+  format: string;
+  source_uri: string;
+  checksum_sha256?: string;
+  size_bytes?: number;
+  tags?: string[];
+}
+
+export interface ModelDownloadJob {
+  id: string;
+  model_id: string;
+  stage: ModelStage;
+  progress: number;
+  started_at: string;
+  finished_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface AuditEvent {
+  id: string;
+  namespace?: string | null;
+  actor?: string | null;
+  event_type: string;
+  recorded_at: string;
+  payload: Record<string, unknown>;
+  signature_valid?: boolean;
+}
+
+export interface ListAuditEventsParams {
+  namespace?: string;
+  eventType?: string;
+  limit?: number;
+  since?: string;
+  until?: string;
+}
+
 export interface CreateSandboxPayload {
   namespace: string;
   name: string;
@@ -218,6 +283,51 @@ export class ApiClient {
 
   async revokeKey(id: string): Promise<void> {
     await this.request<void>(`/api/v1/auth/keys/${id}`, { method: "DELETE" });
+  }
+
+  async listModels(): Promise<ModelRecord[]> {
+    return this.request<ModelRecord[]>(`/api/v1/models`);
+  }
+
+  async registerModel(payload: RegisterModelPayload): Promise<ModelRecord> {
+    return this.request<ModelRecord>(`/api/v1/models`, {
+      method: "POST",
+      body: payload,
+    });
+  }
+
+  async refreshModel(id: string): Promise<ModelRecord> {
+    return this.request<ModelRecord>(`/api/v1/models/${id}/refresh`, { method: "POST" });
+  }
+
+  async deleteModel(id: string): Promise<void> {
+    await this.request<void>(`/api/v1/models/${id}`, { method: "DELETE" });
+  }
+
+  async listModelJobs(id: string): Promise<ModelDownloadJob[]> {
+    return this.request<ModelDownloadJob[]>(`/api/v1/models/${id}/jobs`);
+  }
+
+  async listAuditEvents(params: ListAuditEventsParams = {}): Promise<AuditEvent[]> {
+    const search = new URLSearchParams();
+    if (params.namespace) {
+      search.set("namespace", params.namespace);
+    }
+    if (params.eventType) {
+      search.set("event_type", params.eventType);
+    }
+    if (typeof params.limit === "number") {
+      search.set("limit", String(params.limit));
+    }
+    if (params.since) {
+      search.set("since", params.since);
+    }
+    if (params.until) {
+      search.set("until", params.until);
+    }
+    const suffix = search.toString();
+    const path = suffix ? `/api/v1/audit/events?${suffix}` : `/api/v1/audit/events`;
+    return this.request<AuditEvent[]>(path);
   }
 
   private async request<T>(

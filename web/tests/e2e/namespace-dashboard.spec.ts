@@ -82,10 +82,10 @@ test("namespace operator can execute commands", async ({ page }) => {
     return route.fulfill({ status: 200, body: JSON.stringify(lastExecution) });
   });
 
-  await page.goto("/");
-
+  await page.goto("/auth/token?returnTo=/");
   await page.getByLabel("Namespace token").fill("ns-token");
   await page.getByRole("button", { name: "Save token" }).click();
+  await page.waitForURL(/\/?$/);
 
   await page.getByRole("button", { name: "ci-runner" }).click();
   await page.getByRole("button", { name: "Start" }).click();
