@@ -1,11 +1,15 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useToken } from "./token-context";
 
 export function TokenForm() {
   const { token, setToken } = useToken();
   const [value, setValue] = useState(token);
+
+  useEffect(() => {
+    setValue(token);
+  }, [token]);
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
