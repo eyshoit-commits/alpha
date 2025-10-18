@@ -6,8 +6,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - Phase-0 Komponenten sind teilweise implementiert: Der Kernel nutzt ein Prozess-basiertes Isolation-Shim, tiefe Namespace/Seccomp-Logik und Tests fehlen noch (`crates/cave-kernel/src/lib.rs:1`).
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
-- Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
-- Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
+- Dokumentation deckt nun API-/CLI-Details ab: realistische Beispiele und Fehlerverträge in `docs/api.md` und `docs/cli.md` referenzieren `openapi.yaml` (`docs/api.md:1`, `docs/cli.md:1`).
+- CI-Pipeline führt Format/Lint/Test, Schema-Generierung (`make api-schema`) sowie SBOM-Erstellung aus; `make slsa` bleibt Platzhalter und Cosign-Signing läuft nur bei vorhandenen Secrets (`.github/workflows/ci.yml:1`).
 - Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
@@ -35,8 +35,8 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: Dokumente existieren, Review ausstehend (`docs/architecture.md:1`, `docs/env.md:1`).
 
 ## CI, Tests & Artefakte
-- [ ] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.  
-  Status: Workflow (`.github/workflows/ci.yml`) erstellt, `make api-schema` Schritt fehlt weiterhin.
+- [x] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.
+  Status: Python-Generator `scripts/generate_openapi.py` erstellt (`openapi.yaml` via `make api-schema`), CI ruft Target & Validator auf und stellt sicher, dass das Schema eingecheckt bleibt (`.github/workflows/ci.yml:33`).
 - [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).  
   Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
 - [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.  
