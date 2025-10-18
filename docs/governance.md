@@ -25,13 +25,21 @@ Dieses Dokument beschreibt Governance-, Secrets- und Betriebsrichtlinien für di
 ---
 
 ## 2. Telemetrie & Monitoring
-- Sampling-Richtlinien (`CAVE_OTEL_SAMPLING_RATE`):  
-  - Dev: 1.0  
-  - Staging: 0.5  
-  - Production: 0.05–0.2  
-- Alle Services müssen `/healthz` (200/503) und `/metrics` (Prometheus) bereitstellen.  
-- Monitoring aktualisieren, um neue Sandbox-Defaults (2 vCPU / 1 GiB RAM / 120 s / 1 GiB Disk) zu reflektieren.  
+- Sampling-Richtlinien (`CAVE_OTEL_SAMPLING_RATE`):
+  - Dev: 1.0
+  - Staging: 0.5
+  - Production: 0.05–0.2
+- Alle Services müssen `/healthz` (200/503) und `/metrics` (Prometheus) bereitstellen.
+- Monitoring aktualisieren, um neue Sandbox-Defaults (2 vCPU / 1 GiB RAM / 120 s / 1 GiB Disk) zu reflektieren.
 - Alerts für Sandbox-Quota-Verbrauch, fehlgeschlagene Rotationen, OTEL-Exporter und cosign-Verifikation konfigurieren.
+- `telemetry::init` fällt bei OTLP-Problemen automatisch auf Console-Logs zurück; Warnungen in den Logs beobachten und bei Bedarf Collector-/Endpoint-Config anpassen (siehe `docs/telemetry.md`).
+- Sampling-Anpassungen dokumentieren (`docs/Progress.md`) und nach Deployments auf Collector-Receivers prüfen.
+
+### Rate-Limits
+- Gateway-Limits sind durch die Middleware `crates/cave-daemon/src/middleware/rate_limit.rs` enforced.
+- Vorgaben: Admin 1000/min, Namespace 100/min, Session 50/min (Model-Access folgt nach Implementierung).
+- Anpassungen laufen über Konfigurationsänderungen im Quellcode (oder zukünftige Config-Datei) mit PR-Review und Update der Governance-Dokumentation.
+- Incidents (429-Häufungen) analysieren via Logs (Warn-Level) und `Retry-After` Header.
 
 ---
 
@@ -63,6 +71,10 @@ Dieses Dokument beschreibt Governance-, Secrets- und Betriebsrichtlinien für di
 - Bewahre Logs in S3/Blob-Speicher mit WORM (Write Once Read Many) auf.
 - Führe monatliche Audit-Reviews durch (Rotationen, Sandbox-Ausreißer, Telemetrie).
 - Erstelle Incident-Response-Playbooks für Schlüsselverlust, Audit-Manipulation, Telemetrie-Ausfall.
+- `AuditLogWriter` (Kernel) erzeugt HMAC-signierte JSONL-Einträge unter `CAVE_AUDIT_LOG_PATH` (Default `./logs/audit.jsonl`).
+- HMAC-Schlüssel per `CAVE_AUDIT_LOG_HMAC_KEY` (Base64) bereitstellen, Rotation dokumentieren (`docs/Progress.md`) und neue Schlüssel zeitversetzt ausrollen.
+- Rotationsablauf: Writer stoppen (`cave-daemon` herunterfahren), Log-Datei nach `<name>.<timestamp>.jsonl` rotieren, Signaturprüfung durchführen (HMAC mit aktuellem Schlüssel über das serialisierte Event berechnen und mit `signature` vergleichen), neuen Schlüssel aktivieren, Dienst neu starten.
+- Prüfsumme je Eintrag via HMAC (Base64 ohne Padding); für forensische Analysen original Event-JSON erneut signieren und vergleichen.
 
 ---
 
