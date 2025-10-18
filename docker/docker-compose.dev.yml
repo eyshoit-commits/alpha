@@ -40,11 +40,11 @@ services:
         APP_NAME: admin
       cache_from:
         - bkg-web-admin:latest
-    volumes:
-      # Mount for hot reload (if using volume mount approach)
-      # - ../web/admin:/app:ro
-      # - /app/node_modules
-      # - /app/.next
+    # volumes:
+    #   # Mount for hot reload (if using volume mount approach)
+    #   - ../web/admin:/app:ro
+    #   - /app/node_modules
+    #   - /app/.next
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8080
       NODE_ENV: development
@@ -58,11 +58,11 @@ services:
         APP_NAME: app
       cache_from:
         - bkg-web-app:latest
-    volumes:
-      # Mount for hot reload
-      # - ../web/app:/app:ro
-      # - /app/node_modules
-      # - /app/.next
+    # volumes:
+    #   # Mount for hot reload
+    #   - ../web/app:/app:ro
+    #   - /app/node_modules
+    #   - /app/.next
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8080
       NODE_ENV: development
