@@ -81,3 +81,85 @@ button {
   border-color: #5bec92;
   box-shadow: 0 0 15px rgba(91, 236, 146, 0.4);
 }
+
+/* Override default white backgrounds */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  background-color: var(--color-bg-darker) !important;
+  border-color: rgba(91, 236, 146, 0.6) !important;
+  color: var(--color-text-light) !important;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: #5bec92 !important;
+  box-shadow: 0 0 15px rgba(91, 236, 146, 0.3) !important;
+}
+
+/* Dark theme for tables */
+table {
+  color: var(--color-text-light);
+}
+
+thead {
+  background-color: var(--color-bg-darker) !important;
+  border-color: rgba(91, 236, 146, 0.3) !important;
+}
+
+th {
+  color: var(--color-mint) !important;
+  font-weight: 700;
+}
+
+tbody tr {
+  border-color: rgba(91, 236, 146, 0.2) !important;
+}
+
+tbody tr:hover {
+  background-color: var(--color-bg-darker) !important;
+}
+
+td {
+  color: var(--color-text-muted) !important;
+}
+
+/* Dark labels */
+label {
+  color: var(--color-mint) !important;
+  font-weight: 700;
+}
+
+/* Update all white backgrounds to dark */
+.bg-white {
+  background-color: var(--color-bg-card) !important;
+}
+
+.bg-slate-50 {
+  background-color: var(--color-bg-darker) !important;
+}
+
+.bg-slate-100 {
+  background-color: var(--color-bg-darker) !important;
+}
+
+/* Update text colors */
+.text-slate-600,
+.text-slate-700,
+.text-slate-800 {
+  color: var(--color-text-muted) !important;
+}
+
+.text-slate-900 {
+  color: var(--color-text-light) !important;
+}
+
+/* Update borders */
+.border-slate-200,
+.border-slate-300 {
+  border-color: rgba(91, 236, 146, 0.4) !important;
+}
+
+.divide-slate-200,
+.divide-slate-100 {
+  border-color: rgba(91, 236, 146, 0.2) !important;
+}
