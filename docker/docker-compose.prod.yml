@@ -1,0 +1,133 @@
+# Docker Compose configuration for production deployment
+# Use: docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+
+version: '3.8'
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}  # Must be set in environment
+    # Don't expose port externally in production
+    ports: []
+    # Add resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    # Production restart policy
+    restart: always
+    # Use secrets for password (optional, requires Docker Swarm)
+    # secrets:
+    #   - postgres_password
+
+  cave-daemon:
+    environment:
+      RUST_LOG: info
+      RUST_BACKTRACE: 0
+      CAVE_OTEL_SAMPLING_RATE: ${CAVE_OTEL_SAMPLING_RATE:-0.1}
+      BKG_DB_DSN: postgres://cave:${POSTGRES_PASSWORD}@postgres:5432/bkg_db
+      # Enable production security
+      CAVE_DISABLE_ISOLATION: "false"
+      CAVE_ENABLE_NAMESPACES: "true"
+      CAVE_ENABLE_CGROUPS: "true"
+      CAVE_ISOLATION_NO_FALLBACK: "true"
+    # Don't expose port externally, use reverse proxy
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    restart: always
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SYS_ADMIN  # Required for namespaces
+
+  web-admin:
+    environment:
+      # Use internal service name
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-https://api.example.com}
+      NODE_ENV: production
+    # Don't expose port, use reverse proxy
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+
+  web-app:
+    environment:
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-https://api.example.com}
+      NODE_ENV: production
+    # Don't expose port, use reverse proxy
+    ports: []
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+
+  # Add nginx reverse proxy for production
+  nginx:
+    image: nginx:alpine
+    container_name: bkg-nginx
+    depends_on:
+      - cave-daemon
+      - web-admin
+      - web-app
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - bkg-network
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+# Uncomment for Docker Swarm secrets
+# secrets:
+#   postgres_password:
+#     external: true

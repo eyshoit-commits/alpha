@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    container_name: bkg-postgres
+    environment:
+      POSTGRES_USER: cave
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cave_dev_password}
+      POSTGRES_DB: bkg_db
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../schema:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cave -d bkg_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bkg-network
+
+  # Cave daemon (Rust backend)
+  cave-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.daemon
+    container_name: bkg-cave-daemon
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      BKG_DB_DSN: postgres://cave:${POSTGRES_PASSWORD:-cave_dev_password}@postgres:5432/bkg_db
+      BKG_API_PORT: 8080
+      CAVE_WORKSPACE_ROOT: /var/lib/cave/workspaces
+      CAVE_OTEL_SAMPLING_RATE: ${CAVE_OTEL_SAMPLING_RATE:-1.0}
+      CAVE_ENABLE_NAMESPACES: ${CAVE_ENABLE_NAMESPACES:-true}
+      CAVE_ENABLE_CGROUPS: ${CAVE_ENABLE_CGROUPS:-true}
+    volumes:
+      - cave_workspaces:/var/lib/cave/workspaces
+      - cave_data:/var/lib/cave
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - bkg-network
+    restart: unless-stopped
+
+  # Admin Web UI
+  web-admin:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        APP_NAME: admin
+    container_name: bkg-web-admin
+    depends_on:
+      cave-daemon:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: http://cave-daemon:8080
+      NODE_ENV: production
+    ports:
+      - "3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - bkg-network
+    restart: unless-stopped
+
+  # User/Namespace Web UI
+  web-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        APP_NAME: app
+    container_name: bkg-web-app
+    depends_on:
+      cave-daemon:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: http://cave-daemon:8080
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - bkg-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  cave_workspaces:
+    driver: local
+  cave_data:
+    driver: local
+
+networks:
+  bkg-network:
+    driver: bridge

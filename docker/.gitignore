@@ -1,0 +1,11 @@
+# Local environment configuration
+.env
+
+# SSL certificates (use real certs in production)
+ssl/*.pem
+ssl/*.key
+ssl/*.crt
+
+# Logs
+logs/
+*.log

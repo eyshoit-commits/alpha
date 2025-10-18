@@ -1,0 +1,69 @@
+# Docker Compose override for local development
+# This file is automatically merged with docker-compose.yml when using docker-compose
+# Use: docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up
+
+version: '3.8'
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: cave_dev_password
+
+  cave-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.daemon
+      # Faster builds during development
+      cache_from:
+        - bkg-cave-daemon:latest
+    volumes:
+      # Mount source for live reload (if supported)
+      - ../config:/app/config:ro
+      # Keep workspace on host for debugging
+      - ../dev-workspaces:/var/lib/cave/workspaces
+    environment:
+      RUST_LOG: debug
+      RUST_BACKTRACE: 1
+      CAVE_DISABLE_ISOLATION: "false"
+      # Disable auth for dev (if --dev mode exists)
+      # BKG_DEV_MODE: "true"
+    # Override restart policy for easier debugging
+    restart: "no"
+
+  web-admin:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        APP_NAME: admin
+      cache_from:
+        - bkg-web-admin:latest
+    volumes:
+      # Mount for hot reload (if using volume mount approach)
+      # - ../web/admin:/app:ro
+      # - /app/node_modules
+      # - /app/.next
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NODE_ENV: development
+    restart: "no"
+
+  web-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+      args:
+        APP_NAME: app
+      cache_from:
+        - bkg-web-app:latest
+    volumes:
+      # Mount for hot reload
+      # - ../web/app:/app:ro
+      # - /app/node_modules
+      # - /app/.next
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NODE_ENV: development
+    restart: "no"

@@ -1,0 +1,50 @@
+# Dockerfile for cave-daemon (Rust backend)
+FROM rust:1.75-slim as builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+
+# Build release binary
+RUN cargo build --release --bin cave-daemon
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    bubblewrap \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 cave && \
+    mkdir -p /var/lib/cave /var/log/cave && \
+    chown -R cave:cave /var/lib/cave /var/log/cave
+
+WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/cave-daemon /app/cave-daemon
+
+# Copy config files if they exist
+COPY --chown=cave:cave config/ /app/config/ 2>/dev/null || true
+
+USER cave
+
+EXPOSE 8080
+
+ENV RUST_LOG=info
+ENV BKG_DB_PATH=/var/lib/cave/bkg.db
+ENV CAVE_WORKSPACE_ROOT=/var/lib/cave/workspaces
+
+CMD ["/app/cave-daemon"]
