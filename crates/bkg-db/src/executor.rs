@@ -65,9 +65,7 @@ impl ExecutionContext {
 
         for raw in records {
             let entry: WalEntry = from_slice(&raw)?;
-            let table_entry = tables
-                .entry(entry.table.clone())
-                .or_insert_with(TableData::default);
+            let table_entry = tables.entry(entry.table.clone()).or_default();
 
             if table_entry.columns.is_empty() {
                 table_entry.columns = entry.columns.clone();
@@ -239,9 +237,7 @@ fn execute_insert(
 
     {
         let mut tables = ctx.tables.write();
-        let entry = tables
-            .entry(table.to_string())
-            .or_insert_with(TableData::default);
+        let entry = tables.entry(table.to_string()).or_default();
 
         if entry.columns.is_empty() {
             if !columns.is_empty() {

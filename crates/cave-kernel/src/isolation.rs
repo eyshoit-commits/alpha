@@ -74,6 +74,7 @@ async fn write_value(path: PathBuf, value: u64) -> Result<()> {
 async fn write_string(path: PathBuf, value: String) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(&path)
         .await

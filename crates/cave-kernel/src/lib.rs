@@ -7,17 +7,25 @@
 //! layered in later; the current runtime is a safe process isolation shim that
 //! operates within a prepared workspace directory.
 
+mod audit;
 mod isolation;
 
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use audit::{AuditEvent, AuditLogWriter};
 use bkg_db::{
     self, Database, ExecutionRecord, NewSandbox, ResourceLimits, SandboxError, SandboxRecord,
     SandboxStatus,
@@ -27,12 +35,14 @@ use isolation::{add_pid_to_cgroup, cleanup_cgroup, prepare_cgroup};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex, task::spawn_blocking};
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
 use which::which;
 
 const DEFAULT_RUNTIME_KIND: &str = "process";
+
+pub use audit::AuditConfig;
 
 /// Logical configuration driving the kernel behaviour.
 #[derive(Debug, Clone)]
@@ -41,6 +51,7 @@ pub struct KernelConfig {
     pub default_limits: ResourceLimits,
     pub default_runtime: String,
     pub isolation: IsolationSettings,
+    pub audit: AuditConfig,
 }
 
 impl KernelConfig {
@@ -57,6 +68,7 @@ impl Default for KernelConfig {
             default_limits: ResourceLimits::default(),
             default_runtime: DEFAULT_RUNTIME_KIND.to_string(),
             isolation: IsolationSettings::default(),
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -69,6 +81,8 @@ pub struct IsolationSettings {
     pub bubblewrap_path: Option<PathBuf>,
     pub cgroup_root: Option<PathBuf>,
     pub fallback_to_plain: bool,
+    pub overlay: OverlayConfig,
+    pub seccomp: Option<SeccompConfig>,
 }
 
 impl Default for IsolationSettings {
@@ -79,7 +93,39 @@ impl Default for IsolationSettings {
             bubblewrap_path: None,
             cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/bkg")),
             fallback_to_plain: true,
+            overlay: OverlayConfig::default(),
+            seccomp: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OverlayConfig {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeccompAction {
+    Errno(i32),
+    KillProcess,
+}
+
+impl Default for SeccompAction {
+    fn default() -> Self {
+        Self::Errno(1)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SeccompConfig {
+    pub action: SeccompAction,
+    pub deny_syscalls: Vec<String>,
+}
+
+impl SeccompConfig {
+    pub fn deny(mut self, syscall: impl Into<String>) -> Self {
+        self.deny_syscalls.push(syscall.into());
+        self
     }
 }
 
@@ -92,6 +138,7 @@ where
     runtime: Arc<R>,
     config: KernelConfig,
     instances: Arc<RwLock<HashMap<Uuid, Arc<dyn SandboxInstance>>>>,
+    audit: Option<Arc<AuditLogWriter>>,
 }
 
 impl<R> Clone for CaveKernel<R>
@@ -104,6 +151,7 @@ where
             runtime: self.runtime.clone(),
             config: self.config.clone(),
             instances: self.instances.clone(),
+            audit: self.audit.clone(),
         }
     }
 }
@@ -113,16 +161,41 @@ where
     R: SandboxRuntime,
 {
     pub fn new(db: Database, runtime: R, config: KernelConfig) -> Self {
+        let audit = if config.audit.enabled {
+            match AuditLogWriter::try_new(&config.audit) {
+                Ok(writer) => Some(Arc::new(writer)),
+                Err(err) => {
+                    warn!(error = %err, "failed to initialize audit log writer; disabling audits");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             db,
             runtime: Arc::new(runtime),
             config,
             instances: Arc::new(RwLock::new(HashMap::new())),
+            audit,
         }
     }
 
     pub fn config(&self) -> &KernelConfig {
         &self.config
+    }
+
+    async fn record_audit(&self, event: AuditEvent) {
+        if let Some(writer) = self.audit.clone() {
+            if let Err(err) = writer.append(&event).await {
+                warn!(
+                    sandbox_id = %event.sandbox_id,
+                    error = %err,
+                    "failed to append audit log entry"
+                );
+            }
+        }
     }
 
     /// Creates a sandbox entry and enforces namespace uniqueness.
@@ -152,6 +225,14 @@ where
             .map_err(KernelError::from)?;
 
         info!(sandbox_id = %record.id, namespace = %record.namespace, "sandbox created");
+        self.record_audit(AuditEvent::sandbox_created(
+            record.id,
+            record.namespace.clone(),
+            record.name.clone(),
+            record.runtime.clone(),
+            record.limits(),
+        ))
+        .await;
         Ok(record)
     }
 
@@ -197,6 +278,11 @@ where
                     .map_err(KernelError::from)?
                     .expect("sandbox must exist after start");
                 info!(sandbox_id = %id, "sandbox running");
+                self.record_audit(AuditEvent::sandbox_started(
+                    updated.id,
+                    updated.namespace.clone(),
+                ))
+                .await;
                 Ok(updated)
             }
             Err(err) => {
@@ -230,6 +316,8 @@ where
         let effective_request =
             request.with_default_timeout(Duration::from_secs(record.timeout_seconds as u64));
         let runtime_request = effective_request.clone();
+        let command_for_log = effective_request.command.clone();
+        let args_for_log = effective_request.args.clone();
         let outcome = instance
             .exec(runtime_request)
             .await
@@ -252,13 +340,24 @@ where
             .await
             .map_err(KernelError::from)?;
 
+        self.record_audit(AuditEvent::sandbox_exec(
+            record.id,
+            record.namespace.clone(),
+            command_for_log,
+            args_for_log,
+            outcome.exit_code,
+            outcome.duration_ms(),
+            outcome.timed_out,
+        ))
+        .await;
+
         Ok(outcome)
     }
 
     /// Stops the runtime instance and updates state tracking.
     #[instrument(skip(self))]
     pub async fn stop_sandbox(&self, id: Uuid) -> Result<(), KernelError> {
-        let _record = self
+        let record = self
             .db
             .fetch_sandbox(id)
             .await
@@ -281,6 +380,11 @@ where
             .await
             .map_err(KernelError::from)?;
         info!(sandbox_id = %id, "sandbox stopped");
+        self.record_audit(AuditEvent::sandbox_stopped(
+            record.id,
+            record.namespace.clone(),
+        ))
+        .await;
         Ok(())
     }
 
@@ -310,6 +414,11 @@ where
             .map_err(KernelError::from)?;
 
         info!(sandbox_id = %id, "sandbox deleted");
+        self.record_audit(AuditEvent::sandbox_deleted(
+            record.id,
+            record.namespace.clone(),
+        ))
+        .await;
         Ok(())
     }
 
@@ -458,6 +567,7 @@ pub struct ProcessSandboxRuntime {
 struct ProcessRuntimeInner {
     isolation: IsolationSettings,
     bubblewrap_path: Option<PathBuf>,
+    seccomp_warned: AtomicBool,
 }
 
 impl ProcessSandboxRuntime {
@@ -490,11 +600,49 @@ impl ProcessSandboxRuntime {
         let inner = ProcessRuntimeInner {
             isolation,
             bubblewrap_path,
+            seccomp_warned: AtomicBool::new(false),
         };
 
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+}
+
+impl ProcessRuntimeInner {
+    #[cfg(target_os = "linux")]
+    fn apply_seccomp(&self, command: &mut Command) -> Result<()> {
+        use std::io;
+
+        if let Some(config) = self.isolation.seccomp.as_ref() {
+            if config.deny_syscalls.is_empty() {
+                return Ok(());
+            }
+
+            if self.isolation.enable_namespaces && self.bubblewrap_path.is_some() {
+                if !self.seccomp_warned.swap(true, Ordering::Relaxed) {
+                    warn!("seccomp profile is not applied when executing via bubblewrap; configure bubblewrap policies instead");
+                }
+                return Ok(());
+            }
+
+            let profile = config.clone();
+            unsafe {
+                command
+                    .pre_exec(move || install_seccomp_filter(&profile).map_err(io::Error::other));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn apply_seccomp(&self, _command: &mut Command) -> Result<()> {
+        if self.isolation.seccomp.is_some() && !self.seccomp_warned.swap(true, Ordering::Relaxed) {
+            warn!("seccomp filtering requires Linux; skipping enforcement");
+        }
+
+        Ok(())
     }
 }
 
@@ -506,6 +654,19 @@ impl SandboxRuntime for ProcessSandboxRuntime {
         workspace: &Path,
     ) -> Result<Arc<dyn SandboxInstance>> {
         fs::create_dir_all(workspace).await?;
+
+        #[cfg(not(target_os = "linux"))]
+        if self.inner.isolation.overlay.enabled {
+            return Err(anyhow!("filesystem overlay isolation requires Linux"));
+        }
+
+        let persistent_root = if self.inner.isolation.overlay.enabled {
+            let root = workspace.join("root");
+            fs::create_dir_all(&root).await?;
+            root
+        } else {
+            workspace.to_path_buf()
+        };
 
         let cgroup_path = if self.inner.isolation.enable_cgroups {
             if let Some(root) = self.inner.isolation.cgroup_root.as_ref() {
@@ -527,12 +688,20 @@ impl SandboxRuntime for ProcessSandboxRuntime {
             None
         };
 
+        let overlay = OverlayManager::new(
+            persistent_root.clone(),
+            workspace.join(".overlay"),
+            self.inner.isolation.overlay.clone(),
+        );
+
         let instance = ProcessSandboxInstance::new(
             sandbox.id,
             workspace.to_path_buf(),
+            persistent_root,
             sandbox.limits(),
             self.inner.clone(),
             cgroup_path,
+            overlay,
         );
         Ok(Arc::new(instance))
     }
@@ -557,28 +726,34 @@ impl SandboxRuntime for ProcessSandboxRuntime {
 #[derive(Debug)]
 struct ProcessSandboxInstance {
     sandbox_id: Uuid,
-    workspace: PathBuf,
+    workspace_root: PathBuf,
+    persistent_root: PathBuf,
     limits: ResourceLimits,
     exec_lock: Mutex<()>,
     runtime: Arc<ProcessRuntimeInner>,
     cgroup_path: Option<PathBuf>,
+    overlay: OverlayManager,
 }
 
 impl ProcessSandboxInstance {
     fn new(
         sandbox_id: Uuid,
-        workspace: PathBuf,
+        workspace_root: PathBuf,
+        persistent_root: PathBuf,
         limits: ResourceLimits,
         runtime: Arc<ProcessRuntimeInner>,
         cgroup_path: Option<PathBuf>,
+        overlay: OverlayManager,
     ) -> Self {
         Self {
             sandbox_id,
-            workspace,
+            workspace_root,
+            persistent_root,
             limits,
             exec_lock: Mutex::new(()),
             runtime,
             cgroup_path,
+            overlay,
         }
     }
 }
@@ -591,17 +766,41 @@ impl SandboxInstance for ProcessSandboxInstance {
             .timeout
             .unwrap_or_else(|| Duration::from_secs(self.limits.timeout_seconds as u64));
 
+        let overlay_mount = self.overlay.prepare().await?;
+        let execution_root = overlay_mount.path().to_path_buf();
+        let _overlay_guard = overlay_mount;
+
         let mut command = if self.runtime.isolation.enable_namespaces {
             if let Some(bwrap) = self.runtime.bubblewrap_path.as_ref() {
-                build_bubblewrap_command(bwrap, &request, &self.workspace, self.sandbox_id)
+                build_bubblewrap_command(
+                    bwrap,
+                    &request,
+                    &self.workspace_root,
+                    &execution_root,
+                    self.sandbox_id,
+                )
             } else {
-                build_plain_command(&request, &self.workspace, self.sandbox_id)
+                build_plain_command(
+                    &request,
+                    &execution_root,
+                    &self.persistent_root,
+                    self.sandbox_id,
+                )
             }
         } else {
-            build_plain_command(&request, &self.workspace, self.sandbox_id)
+            build_plain_command(
+                &request,
+                &execution_root,
+                &self.persistent_root,
+                self.sandbox_id,
+            )
         };
 
         command.kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        if let Err(err) = self.runtime.apply_seccomp(&mut command) {
+            warn!(sandbox = %self.sandbox_id, error = %err, "failed to apply seccomp profile");
+        }
         if request.stdin.is_some() {
             command.stdin(std::process::Stdio::piped());
         }
@@ -669,18 +868,343 @@ impl SandboxInstance for ProcessSandboxInstance {
     }
 }
 
-fn build_plain_command(request: &ExecRequest, workspace: &Path, sandbox_id: Uuid) -> Command {
+#[derive(Debug, Clone)]
+struct OverlayManager {
+    enabled: bool,
+    lower_dir: PathBuf,
+    overlay_dir: PathBuf,
+}
+
+impl OverlayManager {
+    fn new(lower_dir: PathBuf, overlay_dir: PathBuf, config: OverlayConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            lower_dir,
+            overlay_dir,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn prepare(&self) -> Result<OverlayMount> {
+        if !self.enabled {
+            return Ok(OverlayMount::passthrough(self.lower_dir.clone()));
+        }
+
+        fs::create_dir_all(&self.overlay_dir).await?;
+        let session_dir = self.overlay_dir.join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&session_dir).await?;
+        let upper = session_dir.join("upper");
+        let work = session_dir.join("work");
+        let merged = session_dir.join("merged");
+        fs::create_dir_all(&upper).await?;
+        fs::create_dir_all(&work).await?;
+        fs::create_dir_all(&merged).await?;
+
+        let lower = self.lower_dir.clone();
+        let upper_clone = upper.clone();
+        let work_clone = work.clone();
+        let merged_clone = merged.clone();
+        spawn_blocking(move || -> Result<()> {
+            mount_overlay(&lower, &upper_clone, &work_clone, &merged_clone)?;
+            Ok(())
+        })
+        .await??;
+
+        Ok(OverlayMount::mounted(merged, session_dir))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn prepare(&self) -> Result<OverlayMount> {
+        if self.enabled {
+            Err(anyhow!("filesystem overlay isolation requires Linux"))
+        } else {
+            Ok(OverlayMount::passthrough(self.lower_dir.clone()))
+        }
+    }
+}
+
+struct OverlayMount {
+    path: PathBuf,
+    _cleanup: Option<OverlayCleanup>,
+}
+
+impl OverlayMount {
+    fn passthrough(path: PathBuf) -> Self {
+        Self {
+            path,
+            _cleanup: None,
+        }
+    }
+
+    fn mounted(path: PathBuf, session_dir: PathBuf) -> Self {
+        Self {
+            path: path.clone(),
+            _cleanup: Some(OverlayCleanup {
+                merged: path,
+                session_dir,
+            }),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+struct OverlayCleanup {
+    merged: PathBuf,
+    session_dir: PathBuf,
+}
+
+impl Drop for OverlayCleanup {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(err) = unmount_overlay(&self.merged) {
+                warn!(path = %self.merged.display(), error = %err, "failed to unmount overlay");
+            }
+        }
+
+        if let Err(err) = std::fs::remove_dir_all(&self.session_dir) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(path = %self.session_dir.display(), error = %err, "failed to clean overlay workspace");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
+    use anyhow::Context;
+    use std::ffi::CString;
+
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+
+    let source = CString::new("overlay").expect("static string");
+    let fstype = CString::new("overlay").expect("static string");
+    let target = path_to_cstring(merged)?;
+    let data_c = CString::new(data).context("overlay mount options")?;
+
+    let result = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            data_c.as_ptr() as *const libc::c_void,
+        )
+    };
+
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("mount overlay at {}", merged.display()));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_overlay(path: &Path) -> Result<()> {
+    use anyhow::Context;
+
+    let target = path_to_cstring(path)?;
+    let result = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("unmount overlay at {}", path.display()));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn path_to_cstring(path: &Path) -> Result<std::ffi::CString> {
+    use anyhow::Context;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("convert {} to CString", path.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn install_seccomp_filter(config: &SeccompConfig) -> Result<()> {
+    use anyhow::Context;
+
+    if config.deny_syscalls.is_empty() {
+        return Ok(());
+    }
+
+    let syscalls = config
+        .deny_syscalls
+        .iter()
+        .map(|name| resolve_syscall_number(name))
+        .collect::<Result<Vec<_>>>()?;
+
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_NO_NEW_PRIVS)");
+        }
+    }
+
+    let mut filter = Vec::with_capacity(syscalls.len() * 2 + 5);
+    filter.push(bpf_stmt(
+        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        SECCOMP_DATA_ARCH_OFFSET,
+    ));
+    filter.push(bpf_jump(
+        (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        audit_arch(),
+        0,
+        1,
+    ));
+    filter.push(bpf_stmt(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        libc::SECCOMP_RET_KILL_PROCESS,
+    ));
+    filter.push(bpf_stmt(
+        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        SECCOMP_DATA_NR_OFFSET,
+    ));
+
+    let deny_action = match config.action {
+        SeccompAction::Errno(errno) => libc::SECCOMP_RET_ERRNO | ((errno as u32) & 0x7fff),
+        SeccompAction::KillProcess => libc::SECCOMP_RET_KILL_PROCESS,
+    };
+
+    for syscall in syscalls {
+        filter.push(bpf_jump(
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            syscall,
+            0,
+            1,
+        ));
+        filter.push(bpf_stmt((libc::BPF_RET | libc::BPF_K) as u16, deny_action));
+    }
+
+    filter.push(bpf_stmt(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        libc::SECCOMP_RET_ALLOW,
+    ));
+
+    let prog = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_mut_ptr(),
+    };
+
+    unsafe {
+        if libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const _ as *const std::ffi::c_void,
+            0,
+            0,
+        ) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("prctl(PR_SET_SECCOMP)");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
+    libc::sock_filter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+    libc::sock_filter { code, jt, jf, k }
+}
+
+#[cfg(target_os = "linux")]
+fn audit_arch() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        0xC000_003E
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        0xC000_00B7
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        0xC000_003E
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_syscall_number(name: &str) -> Result<u32> {
+    if let Ok(value) = name.parse::<i64>() {
+        if value < 0 {
+            return Err(anyhow!("invalid syscall number {}", value));
+        }
+        return Ok(value as u32);
+    }
+
+    let number = match name {
+        "clone" => libc::SYS_clone,
+        "execve" => libc::SYS_execve,
+        "fork" => libc::SYS_fork,
+        "kill" => libc::SYS_kill,
+        "mount" => libc::SYS_mount,
+        "open" => libc::SYS_open,
+        "openat" => libc::SYS_openat,
+        "pivot_root" => libc::SYS_pivot_root,
+        "ptrace" => libc::SYS_ptrace,
+        "setgid" => libc::SYS_setgid,
+        "setuid" => libc::SYS_setuid,
+        "socket" => libc::SYS_socket,
+        "umount" => libc::SYS_umount2,
+        "unshare" => libc::SYS_unshare,
+        "chmod" => libc::SYS_chmod,
+        "chown" => libc::SYS_chown,
+        "mknod" => libc::SYS_mknod,
+        other => {
+            return Err(anyhow!("unknown syscall '{}' in seccomp profile", other));
+        }
+    };
+
+    Ok(number as u32)
+}
+
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+
+#[cfg(target_os = "linux")]
+const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+
+fn build_plain_command(
+    request: &ExecRequest,
+    workdir: &Path,
+    persistent_root: &Path,
+    sandbox_id: Uuid,
+) -> Command {
     let mut command = Command::new(&request.command);
     command.args(&request.args);
-    command.current_dir(workspace);
+    command.current_dir(workdir);
     command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
+    command.env("BKG_SANDBOX_WORKDIR", workdir);
+    command.env("BKG_SANDBOX_ROOT", persistent_root);
     command
 }
 
 fn build_bubblewrap_command(
     bwrap_path: &Path,
     request: &ExecRequest,
-    workspace: &Path,
+    workspace_root: &Path,
+    execution_root: &Path,
     sandbox_id: Uuid,
 ) -> Command {
     let mut command = Command::new(bwrap_path);
@@ -701,8 +1225,11 @@ fn build_bubblewrap_command(
     }
 
     command.arg("--dev-bind").arg("/dev").arg("/dev");
-    command.arg("--bind").arg(workspace).arg(workspace);
-    command.arg("--chdir").arg(workspace);
+    command
+        .arg("--bind")
+        .arg(execution_root)
+        .arg(workspace_root);
+    command.arg("--chdir").arg(workspace_root);
     command.arg("--tmpfs").arg("/tmp");
     command
         .arg("--setenv")
@@ -712,6 +1239,14 @@ fn build_bubblewrap_command(
         .arg("--setenv")
         .arg("BKG_SANDBOX_ID")
         .arg(sandbox_id.to_string());
+    command
+        .arg("--setenv")
+        .arg("BKG_SANDBOX_WORKDIR")
+        .arg(workspace_root);
+    command
+        .arg("--setenv")
+        .arg("BKG_SANDBOX_ROOT")
+        .arg(workspace_root);
 
     command.arg("--");
     command.arg(&request.command);
@@ -743,6 +1278,7 @@ mod tests {
         let mut config = KernelConfig::default();
         config.isolation.enable_cgroups = false;
         config.isolation.enable_namespaces = false;
+        config.audit.enabled = false;
         let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
         let kernel = CaveKernel::new(db, runtime, config);
 
@@ -769,6 +1305,221 @@ mod tests {
 
         assert_eq!(outcome.exit_code, Some(0));
         assert!(outcome.stdout.unwrap().contains("hello"));
+
+        kernel.stop_sandbox(created.id).await.unwrap();
+        kernel.delete_sandbox(created.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_lifecycle_events() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut config = KernelConfig::default();
+        config.isolation.enable_cgroups = false;
+        config.isolation.enable_namespaces = false;
+        config.audit.enabled = true;
+        config.audit.log_path =
+            std::env::temp_dir().join(format!("cave-kernel-audit-{}.jsonl", Uuid::new_v4()));
+        config.audit.hmac_key = None;
+        let audit_path = config.audit.log_path.clone();
+
+        let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
+        let kernel = CaveKernel::new(db, runtime, config);
+
+        let created = kernel
+            .create_sandbox(CreateSandboxRequest::new("ns", "audit"))
+            .await
+            .unwrap();
+        kernel.start_sandbox(created.id).await.unwrap();
+        let _ = kernel
+            .exec(
+                created.id,
+                ExecRequest {
+                    command: "echo".into(),
+                    args: vec!["audit".into()],
+                    stdin: None,
+                    timeout: Some(Duration::from_secs(2)),
+                },
+            )
+            .await
+            .unwrap();
+        kernel.stop_sandbox(created.id).await.unwrap();
+        kernel.delete_sandbox(created.id).await.unwrap();
+
+        let contents = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        tokio::fs::remove_file(&audit_path).await.unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert!(lines.iter().any(|line| line.contains("sandbox_created")));
+        assert!(lines.iter().any(|line| line.contains("sandbox_exec")));
+        assert!(lines.iter().any(|line| line.contains("sandbox_deleted")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn seccomp_blocks_socket_syscall() {
+        if which::which("cc").is_err() {
+            eprintln!("skipping seccomp test: cc compiler not available");
+            return;
+        }
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut config = KernelConfig::default();
+        config.audit.enabled = false;
+        config.isolation.enable_namespaces = false;
+        config.isolation.enable_cgroups = false;
+        config.isolation.overlay.enabled = false;
+        config.isolation.seccomp = Some(SeccompConfig {
+            action: SeccompAction::Errno(libc::EPERM),
+            deny_syscalls: vec!["socket".into()],
+        });
+
+        let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
+        let kernel = CaveKernel::new(db, runtime, config);
+
+        let created = kernel
+            .create_sandbox(CreateSandboxRequest::new("seccomp", "socket"))
+            .await
+            .unwrap();
+        kernel.start_sandbox(created.id).await.unwrap();
+
+        let workspace = kernel
+            .config()
+            .workspace_for(&created.namespace, created.id);
+        let source = workspace.join("socket_probe.c");
+        let binary = workspace.join("socket_probe");
+
+        fs::create_dir_all(&workspace).await.unwrap();
+        tokio::fs::write(
+            &source,
+            r#"#include <sys/socket.h>
+#include <unistd.h>
+#include <stdio.h>
+int main(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return 111;
+    }
+    close(fd);
+    return 0;
+}
+"#,
+        )
+        .await
+        .unwrap();
+
+        let status = std::process::Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let outcome = match kernel
+            .exec(
+                created.id,
+                ExecRequest {
+                    command: "./socket_probe".into(),
+                    args: vec![],
+                    stdin: None,
+                    timeout: Some(Duration::from_secs(5)),
+                },
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) if err.to_string().contains("Operation not permitted") => {
+                eprintln!("skipping seccomp test: {err}");
+                kernel.stop_sandbox(created.id).await.unwrap();
+                kernel.delete_sandbox(created.id).await.unwrap();
+                return;
+            }
+            Err(err) => panic!("unexpected seccomp exec error: {err}"),
+        };
+
+        assert!(
+            outcome.exit_code == Some(111) || outcome.exit_code.is_none(),
+            "expected EPERM(111) or signal termination, got {:?}",
+            outcome.exit_code
+        );
+        if let Some(code) = outcome.exit_code {
+            if code == 111 {
+                assert!(outcome
+                    .stderr
+                    .as_ref()
+                    .map(|err| err.contains("socket"))
+                    .unwrap_or(false));
+            }
+        }
+
+        kernel.stop_sandbox(created.id).await.unwrap();
+        kernel.delete_sandbox(created.id).await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn overlay_discards_mutations() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut config = KernelConfig::default();
+        config.audit.enabled = false;
+        config.isolation.enable_namespaces = false;
+        config.isolation.enable_cgroups = false;
+        config.isolation.overlay.enabled = true;
+        config.isolation.seccomp = None;
+
+        let runtime = ProcessSandboxRuntime::new(config.isolation.clone()).unwrap();
+        let kernel = CaveKernel::new(db, runtime, config);
+
+        let created = kernel
+            .create_sandbox(CreateSandboxRequest::new("overlay", "fs"))
+            .await
+            .unwrap();
+        kernel.start_sandbox(created.id).await.unwrap();
+
+        let workspace = kernel
+            .config()
+            .workspace_for(&created.namespace, created.id);
+        let persistent_root = workspace.join("root");
+        let immutable = persistent_root.join("immutable.txt");
+        fs::create_dir_all(&persistent_root).await.unwrap();
+        tokio::fs::write(&immutable, "original").await.unwrap();
+
+        let outcome = match kernel
+            .exec(
+                created.id,
+                ExecRequest {
+                    command: "sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        "echo mutated > immutable.txt && touch ephemeral.txt".into(),
+                    ],
+                    stdin: None,
+                    timeout: Some(Duration::from_secs(5)),
+                },
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(err)
+                if err.to_string().contains("Operation not permitted")
+                    || err.to_string().contains("mount overlay") =>
+            {
+                eprintln!("skipping overlay test: {err}");
+                kernel.stop_sandbox(created.id).await.unwrap();
+                kernel.delete_sandbox(created.id).await.unwrap();
+                return;
+            }
+            Err(err) => panic!("unexpected overlay exec error: {err}"),
+        };
+        assert_eq!(outcome.exit_code, Some(0));
+
+        let contents = tokio::fs::read_to_string(&immutable).await.unwrap();
+        assert_eq!(contents.trim(), "original");
+
+        let ephemeral_exists = tokio::fs::try_exists(persistent_root.join("ephemeral.txt"))
+            .await
+            .unwrap();
+        assert!(!ephemeral_exists);
 
         kernel.stop_sandbox(created.id).await.unwrap();
         kernel.delete_sandbox(created.id).await.unwrap();

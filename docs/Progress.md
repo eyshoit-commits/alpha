@@ -3,16 +3,16 @@
 Zuletzt synchronisiert mit `README.md` v1.8.2.
 
 ## Aktueller Status (Stand 2025-10-18)
-- Phase-0 Komponenten sind teilweise implementiert: Der Kernel nutzt ein Prozess-basiertes Isolation-Shim, tiefe Namespace/Seccomp-Logik und Tests fehlen noch (`crates/cave-kernel/src/lib.rs:1`).
+- Phase-0 Komponenten sind teilweise implementiert: Das Prozess-Shim spannt jetzt Overlay-Workspaces und eine konfigurierbare Seccomp-BPF-Filterung auf, inklusive Linux-Tests für geblockte Sockets sowie nicht-persistente Schreibversuche (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Namespace-Hardening via Bubblewrap bleibt offen.
 - Persistenz läuft aktuell über eine SQLite-Anbindung; die in der Architektur geforderte Postgres/RLS-Konfiguration ist noch offen (`crates/bkg-db/src/lib.rs:3`, `docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) sind noch nicht eingecheckt (`docs/architecture.md:19`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
 - Es existiert noch kein Build-/CI-Setup (kein Makefile, keine Pipeline-Konfiguration), sodass SBOM/SLSA und Schema-Validierungen nicht automatisiert werden.
-- Governance-Themen wie Rotations-Webhook, Audit-Log-Streaming und Telemetrie-Policy sind im Code bislang nicht implementiert (keine entsprechenden Module in `crates/cave-daemon` sichtbar).
+- Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
 - [ ] CAVE-Kernel & Sandbox Runtime (Namespaces, cgroups v2, seccomp, FS-Overlay) produktionsreif mit Integrationstests deployt.  
-  Status: Kern-API existiert, Isolation ist ein Prozess-Shim ohne Low-Level-Schutz & Integrationstests (`crates/cave-kernel/src/lib.rs:1`).
+  Status: Kern-API existiert; neben dem HTTP-Lifecycle-Test über den Daemon (`crates/cave-daemon/src/main.rs:975`) stellt das Prozess-Shim nun Overlay-Mounts und eine Seccomp-BPF-Filterung bereit, belegt durch Linux-Tests für Socket-Blockaden und nicht persistente Writes (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`). Erweiterte Namespace-/cgroups-v2-Härtung und Bubblewrap-Policy-Sync stehen weiterhin aus.
 - [ ] Persistente `bkg_db` mit Row-Level-Security betriebsbereit und angebunden.  
   Status: SQLite-Backed Prototyp speichert API-Keys und RLS-Policies inkl. WAL-Recovery (`crates/bkg-db/src/lib.rs:169`, `crates/bkg-db/src/executor.rs:44`); Postgres-Pool & Service-Wiring stehen weiterhin aus (`docs/architecture.md:16`).
 - [ ] Web-UI (admin & user) mit Minimalfunktionen live; Phasenabschluss dokumentiert.  
@@ -51,12 +51,12 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
   Status: AuthService hält Keys nur im Speicher (`crates/cave-daemon/src/auth.rs:52`). Datenmodell & Migration in `bkg_db` anlegen.
 - [ ] RBAC & Rate-Limits im Gateway konfigurieren (Admin 1000/min, Namespace 100/min, Session 50/min, Model-Access 200/min).  
   Status: Rate-Limits existieren nur als Metadaten in `KeyInfo`, keine Durchsetzung (`crates/cave-daemon/src/auth.rs:29`).
-- [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.  
-  Status: Tracing initialisiert, OTEL/Sampling-Anbindung fehlt (`crates/cave-daemon/src/main.rs:61`).
-- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
-  Status: Keine Audit-Log-Writer implementiert.
-- [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
-  Status: ProcessSandboxRuntime nutzt optional Bubblewrap, Seccomp/hardening fehlen (`crates/cave-kernel/src/lib.rs:425`).
+- [ ] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
+  Status: `cave-daemon` respektiert das Sampling über `CAVE_OTEL_SAMPLING_RATE` und clamp't ungültige Werte (`crates/cave-daemon/src/main.rs:48`); OTEL-Exporter & Monitoring fehlen weiterhin.
+- [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.
+  Status: Kernel schreibt Lifecycle- und Exec-Events über den neuen `AuditLogWriter` als signierte JSONL-Datei (`crates/cave-kernel/src/audit.rs:1`, `crates/cave-kernel/src/lib.rs:120`); Integritätsprüfung, Rotation und Versand an zentrale Stores stehen aus.
+- [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.
+  Status: ProcessSandboxRuntime liefert jetzt Overlay-Isolation und einen Seccomp-BPF-Filter für Plain-Execs inklusive Tests (`crates/cave-kernel/src/lib.rs:624`, `crates/cave-kernel/src/lib.rs:1320-1455`); Bubblewrap-Profile & weitergehende Namespace-Härtung fehlen weiterhin.
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  
   Status: Werte synchronisiert; Governance-Team hat Freigabe erteilt.
 

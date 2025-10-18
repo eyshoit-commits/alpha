@@ -122,7 +122,7 @@ impl LogicalOptimizer for PlannerDraft {
 
 fn build_insert_plan(
     table_name: &ObjectName,
-    columns: &Vec<sqlparser::ast::Ident>,
+    columns: &[sqlparser::ast::Ident],
     source: &Query,
 ) -> Result<LogicalPlan> {
     let table = table_name.to_string();
