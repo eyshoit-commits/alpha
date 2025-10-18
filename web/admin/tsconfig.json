@@ -21,10 +21,10 @@
     "types": [
       "@types/node"
     ],
-    "baseUrl": "./src",
+    "baseUrl": ".",
     "paths": {
       "@/*": [
-        "*"
+        "./src/*"
       ],
       "@shared/*": [
         "../lib/*"
