@@ -9,9 +9,9 @@ interface AlertProps {
 
 const variantStyles: Record<AlertVariant, { container: string; title: string; icon: string }> = {
   success: {
-    container: "border-2 border-cyan-500/50 bg-cyan-900/20 text-cyan-100 shadow-lg shadow-cyan-500/20",
-    title: "text-cyan-300",
-    icon: "text-cyan-400",
+    container: "border-2 border-[#75ffaf]/50 bg-[#75ffaf]/10 text-[#75ffaf] shadow-lg shadow-[#75ffaf]/20",
+    title: "text-[#75ffaf]",
+    icon: "text-[#75ffaf]",
   },
   error: {
     container: "border-2 border-red-500/50 bg-red-900/20 text-red-100 shadow-lg shadow-red-500/20",
@@ -19,14 +19,14 @@ const variantStyles: Record<AlertVariant, { container: string; title: string; ic
     icon: "text-red-400",
   },
   warning: {
-    container: "border-2 border-yellow-500/50 bg-yellow-900/20 text-yellow-100 shadow-lg shadow-yellow-500/20",
-    title: "text-yellow-300",
-    icon: "text-yellow-400",
+    container: "border-2 border-[#EC5800]/50 bg-[#EC5800]/10 text-[#EC5800] shadow-lg shadow-[#EC5800]/20",
+    title: "text-[#EC5800]",
+    icon: "text-[#EC5800]",
   },
   info: {
-    container: "border-2 border-purple-500/50 bg-purple-900/20 text-purple-100 shadow-lg shadow-purple-500/20",
-    title: "text-purple-300",
-    icon: "text-purple-400",
+    container: "border-2 border-[#AF75FF]/50 bg-[#AF75FF]/10 text-[#AF75FF] shadow-lg shadow-[#AF75FF]/20",
+    title: "text-[#AF75FF]",
+    icon: "text-[#AF75FF]",
   },
 };
 

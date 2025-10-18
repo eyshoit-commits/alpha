@@ -10,10 +10,10 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-gradient-to-r from-cyan-500 to-blue-500 text-white hover:from-cyan-400 hover:to-blue-400 focus:ring-cyan-400 shadow-lg shadow-cyan-500/50 hover:shadow-cyan-400/60 font-bold",
-  secondary: "bg-[#1a1f3a] text-cyan-400 border-2 border-cyan-500/50 hover:bg-[#2d3561] hover:border-cyan-400 hover:shadow-lg hover:shadow-cyan-500/30 focus:ring-cyan-400 font-semibold",
-  danger: "bg-gradient-to-r from-red-600 to-pink-600 text-white hover:from-red-500 hover:to-pink-500 focus:ring-red-400 shadow-lg shadow-red-500/50",
-  ghost: "text-cyan-400 hover:bg-[#1a1f3a] hover:text-cyan-300 focus:ring-cyan-400",
+  primary: "bg-gradient-to-r from-[#AF75FF] to-[#EC5800] text-white hover:from-[#AF75FF]/90 hover:to-[#EC5800]/90 focus:ring-[#AF75FF] shadow-lg shadow-[#EC5800]/50 hover:shadow-[#EC5800]/70 font-bold",
+  secondary: "bg-[#1a1f3a] text-[#75ffaf] border-2 border-[#75ffaf]/60 hover:bg-[#2d3561] hover:border-[#75ffaf] hover:shadow-lg hover:shadow-[#75ffaf]/40 focus:ring-[#75ffaf] font-semibold",
+  danger: "bg-gradient-to-r from-red-600 to-[#EC5800] text-white hover:from-red-500 hover:to-[#EC5800]/90 focus:ring-red-400 shadow-lg shadow-red-500/50",
+  ghost: "text-[#AF75FF] hover:bg-[#1a1f3a] hover:text-[#75ffaf] focus:ring-[#AF75FF]",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {

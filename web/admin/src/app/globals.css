@@ -12,9 +12,9 @@ body {
   color: #e2e8f0;
   background: #0a0e27;
   background-image: 
-    linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px),
-    radial-gradient(circle at 50% 50%, rgba(0, 212, 255, 0.05) 0%, transparent 50%);
+    linear-gradient(rgba(175, 117, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(117, 255, 175, 0.03) 1px, transparent 1px),
+    radial-gradient(circle at 50% 50%, rgba(236, 88, 0, 0.05) 0%, transparent 50%);
   background-size: 50px 50px, 50px 50px, 100% 100%;
   background-position: 0 0, 0 0, center;
 }

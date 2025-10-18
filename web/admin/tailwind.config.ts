@@ -37,10 +37,9 @@ const config: Config = {
           border: '#2d3561',
         },
         neon: {
-          blue: '#00d4ff',
-          cyan: '#00fff5',
-          purple: '#b967ff',
-          pink: '#ff00ff',
+          orange: '#EC5800',
+          purple: '#AF75FF',
+          mint: '#75ffaf',
         },
         blue: {
           50: '#eff6ff',

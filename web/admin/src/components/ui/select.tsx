@@ -32,9 +32,9 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
           onChange={(e) => onChange(e.target.value)}
           className={`
             rounded-lg border-2 px-4 py-3 text-base shadow-sm transition-all font-medium
-            focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:border-cyan-400 focus:shadow-lg focus:shadow-cyan-500/20
+            focus:outline-none focus:ring-2 focus:ring-[#75ffaf] focus:border-[#75ffaf] focus:shadow-lg focus:shadow-[#75ffaf]/20
             disabled:cursor-not-allowed disabled:bg-[#0a0e27] disabled:text-slate-600
-            ${error ? "border-red-400 bg-red-900/20 text-red-300" : "border-[#2d3561] bg-[#1a1f3a] text-slate-200 hover:border-cyan-500/50"}
+            ${error ? "border-red-400 bg-red-900/20 text-red-300" : "border-[#75ffaf]/40 bg-[#1a1f3a] text-slate-200 hover:border-[#75ffaf]/70"}
             ${className}
           `}
           {...props}
