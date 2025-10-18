@@ -21,9 +21,9 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     return (
       <div className="flex flex-col">
         {label && (
-          <label className="mb-2 text-sm font-medium text-slate-700">
+          <label className="mb-2 text-sm font-bold text-[#75ffaf]">
             {label}
-            {required && <span className="ml-1 text-red-500">*</span>}
+            {required && <span className="ml-1 text-[#EC5800]">*</span>}
           </label>
         )}
         <select

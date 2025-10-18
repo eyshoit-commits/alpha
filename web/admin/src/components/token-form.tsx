@@ -35,7 +35,7 @@ export function TokenForm({ label = "Daemon API token", showClear = true, onSave
   return (
     <form onSubmit={handleSubmit} className="flex flex-wrap gap-3 items-end">
       <label className="flex flex-col text-sm">
-        <span className="font-bold text-purple-300">{label}</span>
+        <span className="font-bold text-[#75ffaf]">{label}</span>
         <input
           type={masked ? "password" : "text"}
           value={value}
