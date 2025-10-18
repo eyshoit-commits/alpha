@@ -16,9 +16,11 @@ WICHTIG: Variablen, die mit `sensitive: true` markiert sind, dürfen niemals in 
 - `BKG_DB_DSN` (sensitive: true)  
   Beschreibung: Database connection string (Postgres DSN). In Produktionsumgebungen aus Vault laden oder via K8s Secret mounten.  
   Beispiel: `postgres://user:password@127.0.0.1:5432/bkgdb`
+  Hinweise: `Database::connect` erkennt `postgres://` bzw. `postgresql://` automatisch, aktiviert den Postgres-Treiber und führt die Migrations aus `crates/bkg-db/migrations_postgres` aus. Verwende `SQLX_OFFLINE=true sqlx migrate run`, um Schema-Änderungen offline vorzubereiten.
 
 - `BKG_DB_PATH` (sensitive: false)  
   Beschreibung: Lokaler Datei‑Pfad (fallback) für einfache /dev Setups. Nicht empfohlen für Prod.
+  Hinweise: Bei `sqlite://` Pfaden nutzt `Database::connect` weiterhin die SQLite-Migrationen (`crates/bkg-db/migrations`). So bleibt ein schneller In-Memory/Datei-Workflow für lokale Tests erhalten.
 
 - `CAVE_RUNTIME_MODE` (sensitive: false)  
   Beschreibung: `quick` | `persistent` — default `quick` für fast cold starts (WASM/WASI). In Produktionsclustern default via policy konfiguriert.

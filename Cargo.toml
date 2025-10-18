@@ -25,7 +25,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "macros", "sqlite", "uuid", "chrono", "migrate"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "macros", "sqlite", "postgres", "any", "uuid", "chrono", "migrate"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 parking_lot = "0.12"
 axum = { version = "0.7", features = ["macros", "json"] }

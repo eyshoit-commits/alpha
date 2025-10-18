@@ -3,15 +3,19 @@
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
+    auth::TokenClaims,
     executor::{DefaultQueryExecutor, ExecutionContext, ExecutionResult, QueryExecutor},
-    planner::{LogicalOptimizer, LogicalPlanner, PlannerDraft},
+    planner::{LogicalOptimizer, LogicalPlan, LogicalPlanner, PlannerDraft},
+    rls::RlsPolicyEngine,
     sql::{DefaultSqlParser, SqlParser},
     Database, NewRlsPolicy, RlsPolicyRecord,
 };
@@ -44,24 +48,29 @@ pub struct EmbeddedRestApi {
     parser: DefaultSqlParser,
     planner: PlannerDraft,
     executor: DefaultQueryExecutor,
+    policy_engine: Arc<dyn RlsPolicyEngine>,
 }
 
 impl EmbeddedRestApi {
-    pub fn new(database: Database, context: ExecutionContext) -> Self {
+    pub fn new(
+        database: Database,
+        context: ExecutionContext,
+        policy_engine: Arc<dyn RlsPolicyEngine>,
+    ) -> Self {
         Self {
             database,
             context,
             parser: DefaultSqlParser::new(),
             planner: PlannerDraft::new(),
             executor: DefaultQueryExecutor::new(),
+            policy_engine,
         }
     }
 
-    fn run_sql(&self, sql: &str) -> Result<ExecutionResult> {
+    fn prepare_plan(&self, sql: &str) -> Result<LogicalPlan> {
         let ast = self.parser.parse(sql)?;
         let logical = self.planner.build_logical_plan(&ast)?;
-        let optimized = self.planner.optimize(logical)?;
-        self.executor.execute(&self.context, &optimized)
+        self.planner.optimize(logical)
     }
 
     fn policy_to_json(record: &RlsPolicyRecord) -> Value {
@@ -76,6 +85,52 @@ impl EmbeddedRestApi {
     }
 }
 
+fn plan_table_name(plan: &LogicalPlan) -> Result<&str> {
+    match plan {
+        LogicalPlan::Insert { table, .. }
+        | LogicalPlan::Select { table, .. }
+        | LogicalPlan::Update { table, .. }
+        | LogicalPlan::Delete { table, .. } => Ok(table.as_str()),
+    }
+}
+
+fn parse_timestamp(value: Option<&Value>, field: &str) -> Result<Option<DateTime<Utc>>> {
+    match value {
+        Some(Value::String(raw)) => {
+            let dt = DateTime::parse_from_rfc3339(raw)
+                .map_err(|err| anyhow!("invalid timestamp for {field}: {err}"))?;
+            Ok(Some(dt.with_timezone(&Utc)))
+        }
+        Some(_) => Err(anyhow!("{field} must be an RFC3339 string")),
+        None => Ok(None),
+    }
+}
+
+fn parse_claims(body: &Value) -> Result<TokenClaims> {
+    let claims_obj = body
+        .get("claims")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("'claims' object is required"))?;
+    let subject = claims_obj
+        .get("subject")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("'claims.subject' is required"))?;
+    let scope = claims_obj
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("'claims.scope' is required"))?;
+    let issued_at = parse_timestamp(claims_obj.get("issued_at"), "claims.issued_at")?
+        .unwrap_or_else(|| Utc::now());
+    let expires_at = parse_timestamp(claims_obj.get("expires_at"), "claims.expires_at")?;
+
+    Ok(TokenClaims {
+        subject: subject.to_string(),
+        scope: scope.to_string(),
+        issued_at,
+        expires_at,
+    })
+}
+
 #[async_trait]
 impl RestApiServer for EmbeddedRestApi {
     async fn handle_query(&self, body: Value) -> Result<ExecutionResult> {
@@ -83,7 +138,18 @@ impl RestApiServer for EmbeddedRestApi {
             .get("sql")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("'sql' field is required"))?;
-        self.run_sql(sql)
+        let claims = parse_claims(&body)?;
+        let plan = self.prepare_plan(sql)?;
+        let table = plan_table_name(&plan)?;
+        let policies = self.policy_engine.policies_for_table(table).await?;
+        let result = self.executor.execute(
+            &self.context,
+            &plan,
+            &claims,
+            &policies,
+            self.policy_engine.as_ref(),
+        )?;
+        Ok(result)
     }
 
     async fn handle_auth(&self, _body: Value) -> Result<Value> {
@@ -201,6 +267,7 @@ mod tests {
     use super::*;
     use crate::executor::{ExecutionContext, ScalarValue};
     use crate::kernel::InMemoryStorageEngine;
+    use crate::rls::DatabasePolicyEngine;
     use serde_json::json;
 
     const TEST_DB_URL: &str = "sqlite::memory:";
@@ -208,7 +275,8 @@ mod tests {
     async fn setup_rest_api() -> EmbeddedRestApi {
         let database = Database::connect(TEST_DB_URL).await.unwrap();
         let context = ExecutionContext::new(InMemoryStorageEngine::new());
-        EmbeddedRestApi::new(database, context)
+        let policy_engine = Arc::new(DatabasePolicyEngine::new(database.clone()));
+        EmbeddedRestApi::new(database, context, policy_engine)
     }
 
     #[tokio::test]
@@ -216,14 +284,22 @@ mod tests {
         let api = setup_rest_api().await;
 
         api.handle_query(json!({
-            "sql": "INSERT INTO projects (id, name) VALUES (1, 'alpha')"
+            "sql": "INSERT INTO projects (id, name) VALUES (1, 'alpha')",
+            "claims": {
+                "subject": "user-1",
+                "scope": "namespace:alpha"
+            }
         }))
         .await
         .unwrap();
 
         let result = api
             .handle_query(json!({
-                "sql": "SELECT * FROM projects"
+                "sql": "SELECT * FROM projects",
+                "claims": {
+                    "subject": "user-1",
+                    "scope": "namespace:alpha"
+                }
             }))
             .await
             .unwrap();

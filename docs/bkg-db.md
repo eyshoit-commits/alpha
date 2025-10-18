@@ -132,6 +132,13 @@ curl -X POST http://localhost:8080/query \
 cd web/admin && npm install && npm run dev
 ```
 
+### Postgres Deployment (Phase-0)
+
+- `Database::connect` erkennt `postgres://` bzw. `postgresql://` DSNs automatisch, richtet einen `sqlx` Postgres-Pool ein und führt die Migrations aus `crates/bkg-db/migrations_postgres` aus. Für lokale SQLite-Setups bleiben die bisherigen `migrations/` aktiv.
+- Migrations für Postgres können offline vorbereitet werden: `SQLX_OFFLINE=true sqlx migrate run` gegen den gewünschten DSN ausführen.
+- Die neue `DatabasePolicyEngine` persistiert RLS-Policies in Postgres (`rls_policies` Tabelle) und verknüpft sie mit Planner/Executor. REST-Aufrufe müssen die Claims (`subject`, `scope`) im Body angeben, damit das RLS-Enforcement greifen kann.
+- Integrationstests stehen unter `crates/bkg-db/tests/postgres_integration.rs` (`cargo test -p bkg-db --test postgres_integration`) und prüfen Namespace-Isolation, Policy-CRUD sowie WAL-Recovery gegen eine Postgres-Instanz.
+
 Weitere Schritte:
 1. Implementiere `/query`, `/auth`, `/policy`, `/schema`, `/realtime` im HTTP-Layer; erweitere pgwire-Unterstützung für Simple/Extended Queries.  
 2. Entwickle das Admin-UI mit Next.js + Tailwind/shadcn; binde es an REST/Realtime APIs.  

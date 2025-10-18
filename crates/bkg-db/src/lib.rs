@@ -17,7 +17,11 @@ pub mod sql;
 pub mod storage;
 pub mod telemetry;
 
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    str::FromStr,
+    sync::{Arc, Once},
+};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -27,8 +31,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
-    Row, SqlitePool,
+    any::{AnyPoolOptions, AnyRow},
+    AnyPool, Row,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -37,34 +41,63 @@ use uuid::Uuid;
 /// Default SQLite busy timeout in milliseconds when the DB is under load.
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
+/// Supported database backends for the persistence layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatabaseDriver {
+    Sqlite,
+    Postgres,
+}
+
 /// Primary entry point to the persistence layer.
 #[derive(Clone, Debug)]
 pub struct Database {
-    pool: SqlitePool,
+    pool: AnyPool,
+    driver: DatabaseDriver,
 }
 
 impl Database {
     /// Establishes (or creates) a connection pool to the SQLite database located at
     /// the given URL (e.g. `sqlite:///var/lib/bkg/bkg.db`).
     pub async fn connect(database_url: &str) -> Result<Self> {
-        let options = SqliteConnectOptions::from_str(database_url)?
-            .create_if_missing(true)
-            .busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS));
+        static DRIVERS: Once = Once::new();
+        DRIVERS.call_once(|| {
+            sqlx::any::install_default_drivers();
+        });
 
-        let pool = SqlitePoolOptions::new()
+        let driver = if database_url.starts_with("postgres://")
+            || database_url.starts_with("postgresql://")
+        {
+            DatabaseDriver::Postgres
+        } else {
+            DatabaseDriver::Sqlite
+        };
+
+        let max_connections = match driver {
+            DatabaseDriver::Sqlite if database_url.contains(":memory:") => 1,
+            _ => 8,
+        };
+
+        let pool = AnyPoolOptions::new()
             .min_connections(1)
-            .max_connections(8)
-            .connect_with(options)
+            .max_connections(max_connections)
+            .connect(database_url)
             .await?;
 
-        sqlx::query("PRAGMA foreign_keys = ON;")
-            .execute(&pool)
-            .await?;
+        match driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query("PRAGMA foreign_keys = ON;")
+                    .execute(&pool)
+                    .await?;
+                let busy_timeout = format!("PRAGMA busy_timeout = {};", SQLITE_BUSY_TIMEOUT_MS);
+                sqlx::query(&busy_timeout).execute(&pool).await?;
+                sqlx::migrate!("./migrations").run(&pool).await?;
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::migrate!("./migrations_postgres").run(&pool).await?;
+            }
+        }
 
-        // Run embedded migrations. The directory is resolved relative to this crate.
-        sqlx::migrate!("./migrations").run(&pool).await?;
-
-        Ok(Self { pool })
+        Ok(Self { pool, driver })
     }
 
     /// Connects to a file path via `sqlite://` scheme.
@@ -75,14 +108,23 @@ impl Database {
 
     /// Exposes the underlying pool. Needed when other services want to compose
     /// queries (e.g. reporting or background tasks).
-    pub fn pool(&self) -> &SqlitePool {
+    pub fn pool(&self) -> &AnyPool {
         &self.pool
+    }
+
+    /// Returns the configured driver for this database handle.
+    pub fn driver(&self) -> DatabaseDriver {
+        self.driver
     }
 
     /// Retrieves an API key by identifier.
     pub async fn fetch_api_key(&self, id: Uuid) -> Result<Option<ApiKeyRecord>> {
-        let row = sqlx::query("SELECT * FROM api_keys WHERE id = ?")
-            .bind(id.to_string())
+        let select = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM api_keys WHERE id = ?",
+            DatabaseDriver::Postgres => "SELECT * FROM api_keys WHERE id = $1",
+        };
+        let row = sqlx::query(select)
+            .bind(encode_uuid(id))
             .fetch_optional(&self.pool)
             .await?;
 
@@ -100,25 +142,39 @@ impl Database {
     ) -> Result<ApiKeyRecord> {
         let now = Utc::now();
         let id = Uuid::new_v4();
+        let now_str = encode_datetime(now);
+        let expires_at_str = encode_optional_datetime(expires_at);
         let (scope_type, scope_namespace) = scope.columns();
-        sqlx::query(
-            r#"
+        let insert = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             INSERT INTO api_keys (
                 id, token_hash, token_prefix, scope_type, scope_namespace,
                 rate_limit, created_at, expires_at, revoked
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(token_hash)
-        .bind(token_prefix)
-        .bind(scope_type)
-        .bind(scope_namespace)
-        .bind(rate_limit as i64)
-        .bind(now.to_rfc3339())
-        .bind(expires_at.map(|v| v.to_rfc3339()))
-        .execute(&self.pool)
-        .await?;
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            INSERT INTO api_keys (
+                id, token_hash, token_prefix, scope_type, scope_namespace,
+                rate_limit, created_at, expires_at, revoked
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#
+            }
+        };
+        sqlx::query(insert)
+            .bind(encode_uuid(id))
+            .bind(token_hash)
+            .bind(token_prefix)
+            .bind(scope_type)
+            .bind(scope_namespace)
+            .bind(rate_limit as i64)
+            .bind(now_str)
+            .bind(expires_at_str)
+            .bind(false)
+            .execute(&self.pool)
+            .await?;
 
         self.fetch_api_key(id)
             .await?
@@ -127,7 +183,11 @@ impl Database {
 
     /// Retrieves an API key by its hashed token value (sha256).
     pub async fn find_api_key_by_hash(&self, token_hash: &str) -> Result<Option<ApiKeyRecord>> {
-        let row = sqlx::query("SELECT * FROM api_keys WHERE token_hash = ?")
+        let select = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM api_keys WHERE token_hash = ?",
+            DatabaseDriver::Postgres => "SELECT * FROM api_keys WHERE token_hash = $1",
+        };
+        let row = sqlx::query(select)
             .bind(token_hash)
             .fetch_optional(&self.pool)
             .await?;
@@ -149,8 +209,13 @@ impl Database {
 
     /// Marks an API key as revoked.
     pub async fn revoke_api_key(&self, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE api_keys SET revoked = 1 WHERE id = ?")
-            .bind(id.to_string())
+        let revoke = match self.driver {
+            DatabaseDriver::Sqlite => "UPDATE api_keys SET revoked = ? WHERE id = ?",
+            DatabaseDriver::Postgres => "UPDATE api_keys SET revoked = $1 WHERE id = $2",
+        };
+        sqlx::query(revoke)
+            .bind(true)
+            .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -158,9 +223,13 @@ impl Database {
 
     /// Updates the `last_used_at` timestamp once authorization succeeds.
     pub async fn touch_api_key_usage(&self, id: Uuid, timestamp: DateTime<Utc>) -> Result<()> {
-        sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
-            .bind(timestamp.to_rfc3339())
-            .bind(id.to_string())
+        let touch = match self.driver {
+            DatabaseDriver::Sqlite => "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
+            DatabaseDriver::Postgres => "UPDATE api_keys SET last_used_at = $1 WHERE id = $2",
+        };
+        sqlx::query(touch)
+            .bind(encode_datetime(timestamp))
+            .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -172,19 +241,32 @@ impl Database {
             .fetch_rls_policy_by_name(&policy.table_name, &policy.policy_name)
             .await?
         {
-            let updated_at = Utc::now().to_rfc3339();
-            sqlx::query(
-                r#"
+            let updated_at = Utc::now();
+            let updated_at_str = encode_datetime(updated_at);
+            let expression_json =
+                serde_json::to_string(&policy.expression).context("serialize RLS expression")?;
+            let query = match self.driver {
+                DatabaseDriver::Sqlite => {
+                    r#"
                 UPDATE rls_policies
                 SET expression = ?, updated_at = ?
                 WHERE id = ?
-                "#,
-            )
-            .bind(serde_json::to_string(&policy.expression)?)
-            .bind(&updated_at)
-            .bind(existing.id.to_string())
-            .execute(&self.pool)
-            .await?;
+                "#
+                }
+                DatabaseDriver::Postgres => {
+                    r#"
+                UPDATE rls_policies
+                SET expression = CAST($1 AS JSONB), updated_at = $2
+                WHERE id = $3
+                "#
+                }
+            };
+            sqlx::query(query)
+                .bind(expression_json)
+                .bind(updated_at_str)
+                .bind(encode_uuid(existing.id))
+                .execute(&self.pool)
+                .await?;
 
             self.fetch_rls_policy(existing.id).await?.ok_or_else(|| {
                 anyhow!(
@@ -194,22 +276,35 @@ impl Database {
             })
         } else {
             let id = Uuid::new_v4();
-            let now = Utc::now().to_rfc3339();
-            sqlx::query(
-                r#"
+            let now = Utc::now();
+            let now_str = encode_datetime(now);
+            let expression_json =
+                serde_json::to_string(&policy.expression).context("serialize RLS expression")?;
+            let query = match self.driver {
+                DatabaseDriver::Sqlite => {
+                    r#"
                 INSERT INTO rls_policies (
                     id, table_name, policy_name, expression, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(id.to_string())
-            .bind(&policy.table_name)
-            .bind(&policy.policy_name)
-            .bind(serde_json::to_string(&policy.expression)?)
-            .bind(&now)
-            .bind(&now)
-            .execute(&self.pool)
-            .await?;
+                "#
+                }
+                DatabaseDriver::Postgres => {
+                    r#"
+                INSERT INTO rls_policies (
+                    id, table_name, policy_name, expression, created_at, updated_at
+                ) VALUES ($1, $2, $3, CAST($4 AS JSONB), $5, $6)
+                "#
+                }
+            };
+            sqlx::query(query)
+                .bind(encode_uuid(id))
+                .bind(&policy.table_name)
+                .bind(&policy.policy_name)
+                .bind(expression_json)
+                .bind(now_str.clone())
+                .bind(now_str)
+                .execute(&self.pool)
+                .await?;
 
             self.fetch_rls_policy(id)
                 .await?
@@ -219,8 +314,13 @@ impl Database {
 
     /// Fetches a persisted RLS policy by identifier.
     pub async fn fetch_rls_policy(&self, id: Uuid) -> Result<Option<RlsPolicyRecord>> {
-        let row = sqlx::query("SELECT * FROM rls_policies WHERE id = ?")
-            .bind(id.to_string())
+        let select = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM rls_policies WHERE id = ?",
+            DatabaseDriver::Postgres =>
+                "SELECT id, table_name, policy_name, expression::text AS expression, created_at, updated_at FROM rls_policies WHERE id = $1",
+        };
+        let row = sqlx::query(select)
+            .bind(encode_uuid(id))
             .fetch_optional(&self.pool)
             .await?;
 
@@ -233,22 +333,44 @@ impl Database {
         table_name: Option<&str>,
     ) -> Result<Vec<RlsPolicyRecord>> {
         let mut rows = match table_name {
-            Some(table) => sqlx::query(
-                r#"
+            Some(table) => {
+                let query = match self.driver {
+                    DatabaseDriver::Sqlite => {
+                        r#"
                 SELECT * FROM rls_policies
                 WHERE table_name = ?
                 ORDER BY policy_name ASC
-                "#,
-            )
-            .bind(table)
-            .fetch(&self.pool),
-            None => sqlx::query(
-                r#"
+                "#
+                    }
+                    DatabaseDriver::Postgres => {
+                        r#"
+                SELECT id, table_name, policy_name, expression::text AS expression, created_at, updated_at
+                FROM rls_policies
+                WHERE table_name = $1
+                ORDER BY policy_name ASC
+                "#
+                    }
+                };
+                sqlx::query(query).bind(table).fetch(&self.pool)
+            }
+            None => {
+                let query = match self.driver {
+                    DatabaseDriver::Sqlite => {
+                        r#"
                 SELECT * FROM rls_policies
                 ORDER BY table_name ASC, policy_name ASC
-                "#,
-            )
-            .fetch(&self.pool),
+                "#
+                    }
+                    DatabaseDriver::Postgres => {
+                        r#"
+                SELECT id, table_name, policy_name, expression::text AS expression, created_at, updated_at
+                FROM rls_policies
+                ORDER BY table_name ASC, policy_name ASC
+                "#
+                    }
+                };
+                sqlx::query(query).fetch(&self.pool)
+            }
         };
 
         let mut out = Vec::new();
@@ -260,8 +382,12 @@ impl Database {
 
     /// Removes a stored RLS policy.
     pub async fn delete_rls_policy(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM rls_policies WHERE id = ?")
-            .bind(id.to_string())
+        let delete = match self.driver {
+            DatabaseDriver::Sqlite => "DELETE FROM rls_policies WHERE id = ?",
+            DatabaseDriver::Postgres => "DELETE FROM rls_policies WHERE id = $1",
+        };
+        sqlx::query(delete)
+            .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -272,16 +398,26 @@ impl Database {
         table_name: &str,
         policy_name: &str,
     ) -> Result<Option<RlsPolicyRecord>> {
-        let row = sqlx::query(
-            r#"
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             SELECT * FROM rls_policies
             WHERE table_name = ? AND policy_name = ?
-            "#,
-        )
-        .bind(table_name)
-        .bind(policy_name)
-        .fetch_optional(&self.pool)
-        .await?;
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT id, table_name, policy_name, expression::text AS expression, created_at, updated_at
+            FROM rls_policies
+            WHERE table_name = $1 AND policy_name = $2
+            "#
+            }
+        };
+        let row = sqlx::query(query)
+            .bind(table_name)
+            .bind(policy_name)
+            .fetch_optional(&self.pool)
+            .await?;
 
         row.map(map_rls_policy).transpose()
     }
@@ -290,38 +426,52 @@ impl Database {
     pub async fn create_sandbox(&self, data: NewSandbox<'_>) -> Result<SandboxRecord> {
         let now = Utc::now();
         let id = Uuid::new_v4();
-        sqlx::query(
-            r#"
+        let id_str = encode_uuid(id);
+        let now_str = encode_datetime(now);
+        let insert = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             INSERT INTO sandboxes (
                 id, namespace, name, runtime, status,
                 cpu_limit_millis, memory_limit_bytes, disk_limit_bytes,
                 timeout_seconds, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(data.namespace)
-        .bind(data.name)
-        .bind(data.runtime)
-        .bind(SandboxStatus::Provisioned.as_str())
-        .bind(data.cpu_limit_millis as i64)
-        .bind(data.memory_limit_bytes as i64)
-        .bind(data.disk_limit_bytes as i64)
-        .bind(data.timeout_seconds as i64)
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await
-        .map_err(|err| {
-            if is_unique_violation(&err) {
-                anyhow::Error::new(SandboxError::DuplicateSandbox(
-                    data.namespace.to_owned(),
-                    data.name.to_owned(),
-                ))
-            } else {
-                err.into()
+            "#
             }
-        })?;
+            DatabaseDriver::Postgres => {
+                r#"
+            INSERT INTO sandboxes (
+                id, namespace, name, runtime, status,
+                cpu_limit_millis, memory_limit_bytes, disk_limit_bytes,
+                timeout_seconds, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#
+            }
+        };
+        sqlx::query(insert)
+            .bind(id_str.clone())
+            .bind(data.namespace)
+            .bind(data.name)
+            .bind(data.runtime)
+            .bind(SandboxStatus::Provisioned.as_str())
+            .bind(data.cpu_limit_millis as i64)
+            .bind(data.memory_limit_bytes as i64)
+            .bind(data.disk_limit_bytes as i64)
+            .bind(data.timeout_seconds as i64)
+            .bind(now_str.clone())
+            .bind(now_str)
+            .execute(&self.pool)
+            .await
+            .map_err(|err| {
+                if is_unique_violation(&err) {
+                    anyhow::Error::new(SandboxError::DuplicateSandbox(
+                        data.namespace.to_owned(),
+                        data.name.to_owned(),
+                    ))
+                } else {
+                    err.into()
+                }
+            })?;
 
         self.fetch_sandbox(id).await?.ok_or_else(|| {
             anyhow!(
@@ -334,8 +484,31 @@ impl Database {
 
     /// Retrieves a sandbox by its identifier.
     pub async fn fetch_sandbox(&self, id: Uuid) -> Result<Option<SandboxRecord>> {
-        let row = sqlx::query("SELECT * FROM sandboxes WHERE id = ?")
-            .bind(id.to_string())
+        let select = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM sandboxes WHERE id = ?",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                namespace,
+                name,
+                runtime,
+                status,
+                cpu_limit_millis,
+                memory_limit_bytes,
+                disk_limit_bytes,
+                timeout_seconds,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at,
+                last_started_at::text AS last_started_at,
+                last_stopped_at::text AS last_stopped_at
+            FROM sandboxes
+            WHERE id = $1
+            "#
+            }
+        };
+        let row = sqlx::query(select)
+            .bind(encode_uuid(id))
             .fetch_optional(&self.pool)
             .await?;
 
@@ -344,10 +517,33 @@ impl Database {
 
     /// Lists all sandboxes within a namespace ordered by creation time descending.
     pub async fn list_sandboxes(&self, namespace: &str) -> Result<Vec<SandboxRecord>> {
-        let mut rows =
-            sqlx::query("SELECT * FROM sandboxes WHERE namespace = ? ORDER BY created_at DESC")
-                .bind(namespace)
-                .fetch(&self.pool);
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => {
+                "SELECT * FROM sandboxes WHERE namespace = ? ORDER BY created_at DESC"
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                namespace,
+                name,
+                runtime,
+                status,
+                cpu_limit_millis,
+                memory_limit_bytes,
+                disk_limit_bytes,
+                timeout_seconds,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at,
+                last_started_at::text AS last_started_at,
+                last_stopped_at::text AS last_stopped_at
+            FROM sandboxes
+            WHERE namespace = $1
+            ORDER BY created_at DESC
+            "#
+            }
+        };
+        let mut rows = sqlx::query(query).bind(namespace).fetch(&self.pool);
 
         let mut out = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -358,60 +554,97 @@ impl Database {
 
     /// Updates the lifecycle status and timestamp bookkeeping.
     pub async fn update_status(&self, id: Uuid, status: SandboxStatus) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            r#"
+        let now = Utc::now();
+        let now_str = encode_datetime(now);
+        let update = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             UPDATE sandboxes
             SET status = ?, updated_at = ?
             WHERE id = ?
-            "#,
-        )
-        .bind(status.as_str())
-        .bind(&now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            UPDATE sandboxes
+            SET status = $1, updated_at = $2
+            WHERE id = $3
+            "#
+            }
+        };
+        sqlx::query(update)
+            .bind(status.as_str())
+            .bind(now_str)
+            .bind(encode_uuid(id))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn touch_last_started(&self, id: Uuid) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            r#"
+        let now = Utc::now();
+        let now_str = encode_datetime(now);
+        let update = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             UPDATE sandboxes
             SET last_started_at = ?, updated_at = ?
             WHERE id = ?
-            "#,
-        )
-        .bind(&now)
-        .bind(&now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            UPDATE sandboxes
+            SET last_started_at = $1, updated_at = $2
+            WHERE id = $3
+            "#
+            }
+        };
+        sqlx::query(update)
+            .bind(now_str.clone())
+            .bind(now_str)
+            .bind(encode_uuid(id))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     pub async fn touch_last_stopped(&self, id: Uuid) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            r#"
+        let now = Utc::now();
+        let now_str = encode_datetime(now);
+        let update = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             UPDATE sandboxes
             SET last_stopped_at = ?, updated_at = ?
             WHERE id = ?
-            "#,
-        )
-        .bind(&now)
-        .bind(&now)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            UPDATE sandboxes
+            SET last_stopped_at = $1, updated_at = $2
+            WHERE id = $3
+            "#
+            }
+        };
+        sqlx::query(update)
+            .bind(now_str.clone())
+            .bind(now_str)
+            .bind(encode_uuid(id))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// Removes a sandbox (and cascading executions) from the catalog.
     pub async fn delete_sandbox(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM sandboxes WHERE id = ?")
-            .bind(id.to_string())
+        let delete = match self.driver {
+            DatabaseDriver::Sqlite => "DELETE FROM sandboxes WHERE id = ?",
+            DatabaseDriver::Postgres => "DELETE FROM sandboxes WHERE id = $1",
+        };
+        sqlx::query(delete)
+            .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -419,25 +652,48 @@ impl Database {
 
     /// Persists an execution event.
     pub async fn record_execution(&self, entry: ExecutionRecord) -> Result<()> {
-        sqlx::query(
-            r#"
+        let ExecutionRecord {
+            sandbox_id,
+            executed_at,
+            command,
+            args,
+            exit_code,
+            stdout,
+            stderr,
+            duration_ms,
+            timed_out,
+        } = entry;
+        let args_json = serde_json::to_string(&args).context("serialize execution args")?;
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             INSERT INTO sandbox_executions (
                 sandbox_id, executed_at, command, args,
                 exit_code, stdout, stderr, duration_ms, timed_out
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(entry.sandbox_id.to_string())
-        .bind(entry.executed_at.to_rfc3339())
-        .bind(entry.command)
-        .bind(serde_json::to_string(&entry.args)?)
-        .bind(entry.exit_code)
-        .bind(entry.stdout)
-        .bind(entry.stderr)
-        .bind(entry.duration_ms as i64)
-        .bind(entry.timed_out as i32)
-        .execute(&self.pool)
-        .await?;
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            INSERT INTO sandbox_executions (
+                sandbox_id, executed_at, command, args,
+                exit_code, stdout, stderr, duration_ms, timed_out
+            ) VALUES ($1, $2, $3, CAST($4 AS JSONB), $5, $6, $7, $8, $9)
+            "#
+            }
+        };
+        sqlx::query(query)
+            .bind(encode_uuid(sandbox_id))
+            .bind(encode_datetime(executed_at))
+            .bind(command)
+            .bind(args_json)
+            .bind(exit_code)
+            .bind(stdout)
+            .bind(stderr)
+            .bind(duration_ms as i64)
+            .bind(timed_out)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -447,17 +703,39 @@ impl Database {
         sandbox_id: Uuid,
         limit: u32,
     ) -> Result<Vec<ExecutionRecord>> {
-        let mut rows = sqlx::query(
-            r#"
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
             SELECT * FROM sandbox_executions
             WHERE sandbox_id = ?
             ORDER BY executed_at DESC
             LIMIT ?
-            "#,
-        )
-        .bind(sandbox_id.to_string())
-        .bind(limit as i64)
-        .fetch(&self.pool);
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id,
+                sandbox_id::text AS sandbox_id,
+                executed_at::text AS executed_at,
+                command,
+                args::text AS args,
+                exit_code,
+                stdout,
+                stderr,
+                duration_ms,
+                timed_out
+            FROM sandbox_executions
+            WHERE sandbox_id = $1
+            ORDER BY executed_at DESC
+            LIMIT $2
+            "#
+            }
+        };
+        let mut rows = sqlx::query(query)
+            .bind(encode_uuid(sandbox_id))
+            .bind(limit as i64)
+            .fetch(&self.pool);
 
         let mut out = Vec::new();
         while let Some(row) = rows.try_next().await? {
@@ -468,7 +746,16 @@ impl Database {
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db_err) if db_err.message().contains("UNIQUE"))
+    match error {
+        sqlx::Error::Database(db_err) => {
+            if let Some(code) = db_err.code() {
+                matches!(code.as_ref(), "2067" | "1555" | "23505")
+            } else {
+                db_err.message().contains("UNIQUE") || db_err.message().contains("unique")
+            }
+        }
+        _ => false,
+    }
 }
 
 fn parse_datetime(value: String) -> Result<DateTime<Utc>> {
@@ -477,12 +764,90 @@ fn parse_datetime(value: String) -> Result<DateTime<Utc>> {
         .map_err(|err| anyhow!("invalid RFC3339 timestamp '{}': {}", value, err))
 }
 
-fn map_sandbox(row: SqliteRow) -> Result<SandboxRecord> {
-    let id: String = row.try_get("id")?;
+fn encode_datetime(value: DateTime<Utc>) -> String {
+    value.to_rfc3339()
+}
+
+fn encode_optional_datetime(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(encode_datetime)
+}
+
+fn encode_uuid(value: Uuid) -> String {
+    value.to_string()
+}
+
+fn parse_uuid(value: String) -> Result<Uuid> {
+    Uuid::parse_str(&value).map_err(|err| anyhow!("invalid UUID '{}': {}", value, err))
+}
+
+fn decode_datetime(row: &AnyRow, column: &str) -> Result<DateTime<Utc>> {
+    let raw: String = row.try_get(column)?;
+    parse_datetime(raw)
+}
+
+fn decode_optional_datetime(row: &AnyRow, column: &str) -> Result<Option<DateTime<Utc>>> {
+    match row.try_get::<String, _>(column) {
+        Ok(raw) => parse_datetime(raw).map(Some),
+        Err(err) if is_unexpected_null(&err) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn is_unexpected_null(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Decode(inner) => contains_null(inner.as_ref()),
+        sqlx::Error::ColumnDecode { source, .. } => contains_null(source.as_ref()),
+        _ => false,
+    }
+}
+
+fn contains_null(err: &(dyn std::error::Error + 'static)) -> bool {
+    if err.to_string().contains("NULL") {
+        return true;
+    }
+
+    if let Some(source) = err.source() {
+        return contains_null(source);
+    }
+
+    false
+}
+
+fn decode_bool(row: &AnyRow, column: &str) -> Result<bool> {
+    match row.try_get::<bool, _>(column) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let raw: i64 = row.try_get(column)?;
+            Ok(raw != 0)
+        }
+    }
+}
+
+fn decode_json_value(row: &AnyRow, column: &str, ctx: &str) -> Result<Value> {
+    let raw: String = row.try_get(column)?;
+    serde_json::from_str(&raw).with_context(|| ctx.to_owned())
+}
+
+fn decode_string_list(row: &AnyRow, column: &str) -> Result<Vec<String>> {
+    let raw: String = row.try_get(column)?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to deserialize JSON array column '{column}'"))
+}
+
+fn decode_optional_string(row: &AnyRow, column: &str) -> Result<Option<String>> {
+    match row.try_get::<String, _>(column) {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if is_unexpected_null(&err) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn map_sandbox(row: AnyRow) -> Result<SandboxRecord> {
     let status: String = row.try_get("status")?;
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
 
     Ok(SandboxRecord {
-        id: Uuid::parse_str(&id)?,
+        id,
         namespace: row.try_get("namespace")?,
         name: row.try_get("name")?,
         runtime: row.try_get("runtime")?,
@@ -491,21 +856,15 @@ fn map_sandbox(row: SqliteRow) -> Result<SandboxRecord> {
         memory_limit_bytes: row.try_get::<i64, _>("memory_limit_bytes")? as u64,
         disk_limit_bytes: row.try_get::<i64, _>("disk_limit_bytes")? as u64,
         timeout_seconds: row.try_get::<i64, _>("timeout_seconds")? as u32,
-        created_at: parse_datetime(row.try_get("created_at")?)?,
-        updated_at: parse_datetime(row.try_get("updated_at")?)?,
-        last_started_at: row
-            .try_get::<Option<String>, _>("last_started_at")?
-            .map(parse_datetime)
-            .transpose()?,
-        last_stopped_at: row
-            .try_get::<Option<String>, _>("last_stopped_at")?
-            .map(parse_datetime)
-            .transpose()?,
+        created_at: decode_datetime(&row, "created_at")?,
+        updated_at: decode_datetime(&row, "updated_at")?,
+        last_started_at: decode_optional_datetime(&row, "last_started_at")?,
+        last_stopped_at: decode_optional_datetime(&row, "last_stopped_at")?,
     })
 }
 
 #[cfg(test)]
-mod tests {
+mod resource_limit_tests {
     use super::ResourceLimits;
 
     #[test]
@@ -518,61 +877,52 @@ mod tests {
     }
 }
 
-fn map_execution(row: SqliteRow) -> Result<ExecutionRecord> {
-    let args_json: String = row.try_get("args")?;
-    let timed_out: i32 = row.try_get("timed_out")?;
-    let sandbox_id_raw: String = row.try_get("sandbox_id")?;
-
+fn map_execution(row: AnyRow) -> Result<ExecutionRecord> {
+    let sandbox_id = parse_uuid(row.try_get::<String, _>("sandbox_id")?)?;
     Ok(ExecutionRecord {
-        sandbox_id: Uuid::parse_str(&sandbox_id_raw)?,
-        executed_at: parse_datetime(row.try_get("executed_at")?)?,
+        sandbox_id,
+        executed_at: decode_datetime(&row, "executed_at")?,
         command: row.try_get("command")?,
-        args: serde_json::from_str(&args_json)
-            .context("failed to deserialize execution args JSON")?,
+        args: decode_string_list(&row, "args")?,
         exit_code: row.try_get("exit_code")?,
-        stdout: row.try_get("stdout")?,
-        stderr: row.try_get("stderr")?,
+        stdout: decode_optional_string(&row, "stdout")?,
+        stderr: decode_optional_string(&row, "stderr")?,
         duration_ms: row.try_get::<i64, _>("duration_ms")? as u64,
-        timed_out: timed_out != 0,
+        timed_out: decode_bool(&row, "timed_out")?,
     })
 }
 
-fn map_api_key(row: SqliteRow) -> Result<ApiKeyRecord> {
-    let id: String = row.try_get("id")?;
+fn map_api_key(row: AnyRow) -> Result<ApiKeyRecord> {
     let scope_type: String = row.try_get("scope_type")?;
     let scope_namespace: Option<String> = row.try_get("scope_namespace")?;
     let scope = ApiKeyScope::try_from_columns(scope_type, scope_namespace)?;
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
 
     Ok(ApiKeyRecord {
-        id: Uuid::parse_str(&id)?,
+        id,
         token_prefix: row.try_get("token_prefix")?,
         scope,
         rate_limit: row.try_get::<i64, _>("rate_limit")? as u32,
-        created_at: parse_datetime(row.try_get("created_at")?)?,
-        last_used_at: row
-            .try_get::<Option<String>, _>("last_used_at")?
-            .map(parse_datetime)
-            .transpose()?,
-        expires_at: row
-            .try_get::<Option<String>, _>("expires_at")?
-            .map(parse_datetime)
-            .transpose()?,
-        revoked: row.try_get::<i64, _>("revoked")? != 0,
+        created_at: decode_datetime(&row, "created_at")?,
+        last_used_at: decode_optional_datetime(&row, "last_used_at")?,
+        expires_at: decode_optional_datetime(&row, "expires_at")?,
+        revoked: decode_bool(&row, "revoked")?,
     })
 }
 
-fn map_rls_policy(row: SqliteRow) -> Result<RlsPolicyRecord> {
-    let id: String = row.try_get("id")?;
-    let expression_json: String = row.try_get("expression")?;
-
+fn map_rls_policy(row: AnyRow) -> Result<RlsPolicyRecord> {
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
     Ok(RlsPolicyRecord {
-        id: Uuid::parse_str(&id)?,
+        id,
         table_name: row.try_get("table_name")?,
         policy_name: row.try_get("policy_name")?,
-        expression: serde_json::from_str(&expression_json)
-            .context("failed to deserialize RLS policy expression")?,
-        created_at: parse_datetime(row.try_get("created_at")?)?,
-        updated_at: parse_datetime(row.try_get("updated_at")?)?,
+        expression: decode_json_value(
+            &row,
+            "expression",
+            "failed to deserialize RLS policy expression",
+        )?,
+        created_at: decode_datetime(&row, "created_at")?,
+        updated_at: decode_datetime(&row, "updated_at")?,
     })
 }
 

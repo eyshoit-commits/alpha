@@ -8,10 +8,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::from_slice;
+use serde_json::{from_slice, Map, Number, Value};
 
+use crate::auth::TokenClaims;
 use crate::kernel::{InMemoryStorageEngine, StorageEngine, StorageTransaction, TransactionMode};
 use crate::planner::{AggregatePlan, ComparisonOp, FilterExpr, FilterKind, LogicalPlan};
+use crate::rls::{RlsPolicy, RlsPolicyEngine};
 
 // TODO(bkg-db/executor): Streaming Iterator API, echte MVCC-Leseansichten,
 // Projection/Filter Operatoren implementieren.
@@ -188,7 +190,14 @@ pub struct ExecutionResult {
 
 /// Executor contract translating logical plans into results.
 pub trait QueryExecutor {
-    fn execute(&self, ctx: &ExecutionContext, plan: &LogicalPlan) -> Result<ExecutionResult>;
+    fn execute(
+        &self,
+        ctx: &ExecutionContext,
+        plan: &LogicalPlan,
+        claims: &TokenClaims,
+        policies: &[RlsPolicy],
+        engine: &dyn RlsPolicyEngine,
+    ) -> Result<ExecutionResult>;
 }
 
 #[derive(Debug, Default, Clone)]
@@ -201,24 +210,33 @@ impl DefaultQueryExecutor {
 }
 
 impl QueryExecutor for DefaultQueryExecutor {
-    fn execute(&self, ctx: &ExecutionContext, plan: &LogicalPlan) -> Result<ExecutionResult> {
+    fn execute(
+        &self,
+        ctx: &ExecutionContext,
+        plan: &LogicalPlan,
+        claims: &TokenClaims,
+        policies: &[RlsPolicy],
+        engine: &dyn RlsPolicyEngine,
+    ) -> Result<ExecutionResult> {
         match plan {
             LogicalPlan::Insert {
                 table,
                 columns,
                 values,
-            } => execute_insert(ctx, table, columns, values),
+            } => execute_insert(ctx, table, columns, values, claims, policies, engine),
             LogicalPlan::Select {
                 table,
                 filter,
                 aggregate,
-            } => execute_select(ctx, table, filter, aggregate),
+            } => execute_select(ctx, table, filter, aggregate, claims, policies, engine),
             LogicalPlan::Update {
                 table,
                 assignments,
                 filter,
-            } => execute_update(ctx, table, assignments, filter),
-            LogicalPlan::Delete { table, filter } => execute_delete(ctx, table, filter),
+            } => execute_update(ctx, table, assignments, filter, claims, policies, engine),
+            LogicalPlan::Delete { table, filter } => {
+                execute_delete(ctx, table, filter, claims, policies, engine)
+            }
         }
     }
 }
@@ -228,6 +246,9 @@ fn execute_insert(
     table: &str,
     columns: &[String],
     values: &[Vec<ScalarValue>],
+    claims: &TokenClaims,
+    policies: &[RlsPolicy],
+    engine: &dyn RlsPolicyEngine,
 ) -> Result<ExecutionResult> {
     if values.is_empty() {
         return Ok(ExecutionResult::default());
@@ -257,6 +278,11 @@ fn execute_insert(
             if row.len() != entry.columns.len() {
                 return Err(anyhow!("row length does not match table schema"));
             }
+            if !row_allowed(engine, policies, claims, &entry.columns, row)? {
+                return Err(anyhow!(
+                    "row violates RLS policy for table '{table}' during insert"
+                ));
+            }
             entry.rows.push(row.clone());
             let wal_entry = WalEntry::insert(table, &entry.columns, row.clone());
             let payload = serde_json::to_vec(&wal_entry)?;
@@ -277,6 +303,9 @@ fn execute_select(
     table: &str,
     filter: &Option<FilterExpr>,
     aggregate: &Option<AggregatePlan>,
+    claims: &TokenClaims,
+    policies: &[RlsPolicy],
+    engine: &dyn RlsPolicyEngine,
 ) -> Result<ExecutionResult> {
     let tables = ctx.tables.read();
     let entry = tables
@@ -287,7 +316,9 @@ fn execute_select(
 
     let mut matched_rows = Vec::new();
     for row in &entry.rows {
-        if filter_matches(&prepared_filter, row)? {
+        if filter_matches(&prepared_filter, row)?
+            && row_allowed(engine, policies, claims, &entry.columns, row)?
+        {
             matched_rows.push(row.clone());
         }
     }
@@ -313,6 +344,9 @@ fn execute_update(
     table: &str,
     assignments: &[(String, ScalarValue)],
     filter: &Option<FilterExpr>,
+    claims: &TokenClaims,
+    policies: &[RlsPolicy],
+    engine: &dyn RlsPolicyEngine,
 ) -> Result<ExecutionResult> {
     let mut tx = ctx.storage.begin_transaction(TransactionMode::ReadWrite)?;
 
@@ -331,13 +365,21 @@ fn execute_update(
 
     let mut affected = 0u64;
     for row in entry.rows.iter_mut() {
-        if filter_matches(&prepared_filter, row)? {
+        if filter_matches(&prepared_filter, row)?
+            && row_allowed(engine, policies, claims, &entry.columns, row)?
+        {
             let before = row.clone();
+            let mut updated = row.clone();
             for (idx, value) in &indexed_assignments {
-                row[*idx] = value.clone();
+                updated[*idx] = value.clone();
             }
-            let after = row.clone();
-            let wal_entry = WalEntry::update(table, &entry.columns, before, after);
+            if !row_allowed(engine, policies, claims, &entry.columns, &updated)? {
+                return Err(anyhow!(
+                    "row violates RLS policy for table '{table}' during update"
+                ));
+            }
+            *row = updated.clone();
+            let wal_entry = WalEntry::update(table, &entry.columns, before, updated);
             let payload = serde_json::to_vec(&wal_entry)?;
             tx.append_log(&payload)?;
             affected += 1;
@@ -356,6 +398,9 @@ fn execute_delete(
     ctx: &ExecutionContext,
     table: &str,
     filter: &Option<FilterExpr>,
+    claims: &TokenClaims,
+    policies: &[RlsPolicy],
+    engine: &dyn RlsPolicyEngine,
 ) -> Result<ExecutionResult> {
     let mut tx = ctx.storage.begin_transaction(TransactionMode::ReadWrite)?;
 
@@ -370,7 +415,9 @@ fn execute_delete(
     let mut removed = Vec::new();
 
     for row in entry.rows.iter() {
-        if filter_matches(&prepared_filter, row)? {
+        if filter_matches(&prepared_filter, row)?
+            && row_allowed(engine, policies, claims, &entry.columns, row)?
+        {
             removed.push(row.clone());
         } else {
             kept.push(row.clone());
@@ -390,6 +437,45 @@ fn execute_delete(
     Ok(ExecutionResult {
         rows_affected: removed.len() as u64,
         rows: Vec::new(),
+    })
+}
+
+fn row_allowed(
+    engine: &dyn RlsPolicyEngine,
+    policies: &[RlsPolicy],
+    claims: &TokenClaims,
+    columns: &[String],
+    row: &[ScalarValue],
+) -> Result<bool> {
+    if policies.is_empty() {
+        return Ok(true);
+    }
+    let json_row = row_to_json(columns, row)?;
+    for policy in policies {
+        if engine.evaluate(policy, claims, &json_row)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn row_to_json(columns: &[String], row: &[ScalarValue]) -> Result<Value> {
+    let mut map = Map::new();
+    for (column, value) in columns.iter().zip(row.iter()) {
+        map.insert(column.clone(), scalar_to_value(value)?);
+    }
+    Ok(Value::Object(map))
+}
+
+fn scalar_to_value(value: &ScalarValue) -> Result<Value> {
+    Ok(match value {
+        ScalarValue::Int64(v) => Value::Number((*v).into()),
+        ScalarValue::Float64(v) => {
+            Value::Number(Number::from_f64(*v).ok_or_else(|| anyhow!("unsupported float value"))?)
+        }
+        ScalarValue::Bool(v) => Value::Bool(*v),
+        ScalarValue::String(v) => Value::String(v.clone()),
+        ScalarValue::Null => Value::Null,
     })
 }
 
@@ -526,8 +612,10 @@ impl ScalarValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::TokenClaims;
     use crate::kernel::InMemoryStorageEngine;
     use crate::planner::{LogicalOptimizer, LogicalPlanner, PlannerDraft};
+    use crate::rls::{InMemoryPolicyEngine, RlsPolicy};
     use crate::sql::{DefaultSqlParser, SqlParser};
     use tempfile::tempdir;
 
@@ -540,6 +628,14 @@ mod tests {
         let parser = DefaultSqlParser::new();
         let planner = PlannerDraft::new();
         let executor = DefaultQueryExecutor::new();
+        let engine = InMemoryPolicyEngine::new();
+        let claims = TokenClaims {
+            subject: "user-1".into(),
+            scope: "namespace:alpha".into(),
+            issued_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+        let policies: Vec<RlsPolicy> = Vec::new();
 
         let insert_ast = parser
             .parse("INSERT INTO projects (id, name) VALUES (1, 'alpha')")
@@ -547,7 +643,9 @@ mod tests {
         let plan = planner
             .optimize(planner.build_logical_plan(&insert_ast).unwrap())
             .unwrap();
-        let result = executor.execute(&ctx, &plan).expect("execute insert");
+        let result = executor
+            .execute(&ctx, &plan, &claims, &policies, &engine)
+            .expect("execute insert");
         assert_eq!(result.rows_affected, 1);
         assert_eq!(ctx.wal_entries(), 1);
 
@@ -558,7 +656,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&select_ast).unwrap())
             .unwrap();
         let rows = executor
-            .execute(&ctx, &select_plan)
+            .execute(&ctx, &select_plan, &claims, &policies, &engine)
             .expect("execute select");
         assert_eq!(rows.rows.len(), 1);
         assert_eq!(rows.rows[0][0], ScalarValue::Int64(1));
@@ -570,7 +668,9 @@ mod tests {
         let count_plan = planner
             .optimize(planner.build_logical_plan(&count_ast).unwrap())
             .unwrap();
-        let count_rows = executor.execute(&ctx, &count_plan).expect("execute count");
+        let count_rows = executor
+            .execute(&ctx, &count_plan, &claims, &policies, &engine)
+            .expect("execute count");
         assert_eq!(count_rows.rows.len(), 1);
         assert_eq!(count_rows.rows[0][0], ScalarValue::Int64(1));
 
@@ -581,7 +681,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&update_ast).unwrap())
             .unwrap();
         let updated = executor
-            .execute(&ctx, &update_plan)
+            .execute(&ctx, &update_plan, &claims, &policies, &engine)
             .expect("execute update");
         assert_eq!(updated.rows_affected, 1);
         assert_eq!(ctx.wal_entries(), 2);
@@ -592,7 +692,9 @@ mod tests {
         let neg_plan = planner
             .optimize(planner.build_logical_plan(&neg_select).unwrap())
             .unwrap();
-        let neg_rows = executor.execute(&ctx, &neg_plan).expect("execute select");
+        let neg_rows = executor
+            .execute(&ctx, &neg_plan, &claims, &policies, &engine)
+            .expect("execute select");
         assert!(neg_rows.rows.is_empty());
 
         let delete_ast = parser
@@ -602,7 +704,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&delete_ast).unwrap())
             .unwrap();
         let deleted = executor
-            .execute(&ctx, &delete_plan)
+            .execute(&ctx, &delete_plan, &claims, &policies, &engine)
             .expect("execute delete");
         assert_eq!(deleted.rows_affected, 1);
         assert_eq!(ctx.wal_entries(), 3);
@@ -614,7 +716,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&post_delete_select).unwrap())
             .unwrap();
         let post_delete_rows = executor
-            .execute(&ctx, &post_delete_plan)
+            .execute(&ctx, &post_delete_plan, &claims, &policies, &engine)
             .expect("execute select all");
         assert!(post_delete_rows.rows.is_empty());
 
@@ -634,6 +736,14 @@ mod tests {
         let parser = DefaultSqlParser::new();
         let planner = PlannerDraft::new();
         let executor = DefaultQueryExecutor::new();
+        let engine = InMemoryPolicyEngine::new();
+        let claims = TokenClaims {
+            subject: "user-1".into(),
+            scope: "namespace:alpha".into(),
+            issued_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+        let policies: Vec<RlsPolicy> = Vec::new();
 
         // Insert a project row.
         let insert_ast = parser
@@ -643,7 +753,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&insert_ast).unwrap())
             .unwrap();
         executor
-            .execute(&ctx, &insert_plan)
+            .execute(&ctx, &insert_plan, &claims, &policies, &engine)
             .expect("execute insert");
 
         // Update the row to ensure WAL captures before/after images.
@@ -654,7 +764,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&update_ast).unwrap())
             .unwrap();
         executor
-            .execute(&ctx, &update_plan)
+            .execute(&ctx, &update_plan, &claims, &policies, &engine)
             .expect("execute update");
 
         drop(ctx);
@@ -670,7 +780,7 @@ mod tests {
             .optimize(planner.build_logical_plan(&select_ast).unwrap())
             .unwrap();
         let rows = executor
-            .execute(&ctx_reload, &select_plan)
+            .execute(&ctx_reload, &select_plan, &claims, &policies, &engine)
             .expect("execute select");
         assert_eq!(rows.rows.len(), 1);
         assert_eq!(rows.rows[0][0], ScalarValue::Int64(1));
