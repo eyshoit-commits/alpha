@@ -41,7 +41,7 @@ export function TokenForm({ label = "Daemon API token", showClear = true, onSave
           value={value}
           onChange={(event) => setValue(event.target.value)}
           placeholder="Paste bearer token"
-          className="mt-1 min-w-[16rem] rounded-lg border-2 border-[#75ffaf]/40 bg-[#1a1f3a] px-4 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-[#75ffaf] focus:ring-2 focus:ring-[#75ffaf] focus:shadow-lg focus:shadow-[#75ffaf]/20 focus:outline-none transition-all"
+          className="mt-1 min-w-[16rem] rounded-lg border-2 border-[#def453]/60 bg-[#1a1f3a] px-4 py-2 text-sm text-slate-200 placeholder:text-slate-500 focus:border-[#def453] focus:ring-2 focus:ring-[#def453] focus:shadow-lg focus:shadow-[#def453]/30 focus:outline-none transition-all"
         />
       </label>
       <div className="flex gap-2">

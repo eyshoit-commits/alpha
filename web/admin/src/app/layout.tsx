@@ -20,7 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <TokenProvider initialToken={initialToken}>
           <div className="min-h-screen bg-transparent text-slate-100">
-            <header className="border-b-2 border-[#75ffaf]/40 bg-gradient-to-r from-[#12172f] via-[#1a1f3a] to-[#12172f] px-6 py-4 shadow-lg shadow-[#75ffaf]/20">
+            <header className="border-b-2 border-[#def453]/60 bg-gradient-to-r from-[#12172f] via-[#1a1f3a] to-[#12172f] px-6 py-4 shadow-lg shadow-[#def453]/30">
               <div className="mx-auto flex max-w-screen-2xl items-center justify-between">
                 <div>
                   <h1 className="text-3xl font-black bg-gradient-to-r from-[#75ffaf] via-[#AF75FF] to-[#EC5800] bg-clip-text text-transparent tracking-tight">
