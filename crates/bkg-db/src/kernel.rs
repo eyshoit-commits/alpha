@@ -268,17 +268,12 @@ impl KernelScaffold {
 }
 
 /// Draft enum describing planned kernel lifecycle stages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KernelStage {
+    #[default]
     Prototype,
     Building,
     Ready,
-}
-
-impl Default for KernelStage {
-    fn default() -> Self {
-        KernelStage::Prototype
-    }
 }
 
 #[cfg(test)]
