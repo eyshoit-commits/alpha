@@ -9,9 +9,9 @@ interface AlertProps {
 
 const variantStyles: Record<AlertVariant, { container: string; title: string; icon: string }> = {
   success: {
-    container: "border-emerald-200 bg-emerald-50 text-emerald-900",
-    title: "text-emerald-900",
-    icon: "text-emerald-600",
+    container: "border-blue-200 bg-blue-50 text-blue-900",
+    title: "text-blue-900",
+    icon: "text-blue-600",
   },
   error: {
     container: "border-red-200 bg-red-50 text-red-900",
@@ -57,12 +57,12 @@ export function Alert({ variant, title, children, onClose }: AlertProps) {
   const styles = variantStyles[variant];
 
   return (
-    <div className={`relative rounded-lg border p-4 ${styles.container}`}>
-      <div className="flex gap-3">
+    <div className={`relative rounded-lg border-2 p-5 shadow-sm ${styles.container}`}>
+      <div className="flex gap-4">
         <div className={styles.icon}>{icons[variant]}</div>
         <div className="flex-1">
-          {title && <p className={`font-semibold ${styles.title}`}>{title}</p>}
-          <div className="mt-1 text-sm">{children}</div>
+          {title && <p className={`text-lg font-bold ${styles.title}`}>{title}</p>}
+          <div className="mt-2 text-base leading-relaxed">{children}</div>
         </div>
         {onClose && (
           <button onClick={onClose} className="text-current opacity-60 hover:opacity-100">
