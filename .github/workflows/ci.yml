@@ -43,20 +43,19 @@ jobs:
       - name: Cargo test
         run: cargo test --workspace
 
-  schema-and-security:
+  api-schema:
     runs-on: ubuntu-latest
     needs: lint-test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          toolchain: stable
-          override: true
+          python-version: "3.11"
 
-      - name: Install Node (for ajv)
+      - name: Install Node (for OpenAPI validation)
         uses: actions/setup-node@v4
         with:
           node-version: "18"
@@ -81,14 +80,29 @@ jobs:
             echo "cave.yaml not found, skipping schema validation."
           fi
 
-      - name: Security tests placeholder
+  security-tests:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security test dependencies
         run: |
-          if [ -d "security" ]; then
-            pip install -r security/requirements.txt
-            pytest security/
+          python -m pip install --upgrade pip
+          if [ -f "tests/security/requirements.txt" ]; then
+            python -m pip install -r tests/security/requirements.txt
           else
-            echo "security/ directory missing; add tests to enable this step."
+            python -m pip install pytest
           fi
+
+      - name: Run security tests
+        run: pytest tests/security
 
   web-ui:
     runs-on: ubuntu-latest
@@ -134,10 +148,15 @@ jobs:
 
   supply-chain:
     runs-on: ubuntu-latest
-    needs: [schema-and-security, web-ui]
+    needs: [api-schema, security-tests, web-ui]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -145,16 +164,11 @@ jobs:
       - name: Install Syft (SBOM)
         uses: anchore/sbom-action/download-syft@v0
 
-      - name: Install SLSA generator
-        uses: slsa-framework/slsa-github-generator/actions/installer@v1.10.0
-
       - name: Generate SBOM
-        run: |
-          syft packages dir:. -o json > sbom.json
+        run: make sbom
 
-      - name: Generate SLSA provenance (placeholder)
-        run: |
-          echo "TODO: invoke make slsa once implemented"
+      - name: Generate SLSA provenance
+        run: make slsa
 
       - name: Sign SBOM when key is provided
         env:
@@ -170,3 +184,13 @@ jobs:
           else
             echo "Skipping cosign signing; provide COSIGN_KEY_B64 secret or cosign.key artifact to enable signing."
           fi
+
+      - name: Upload supply chain artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-artifacts
+          path: |
+            sbom.json
+            slsa.json
+            sbom.sig
+          if-no-files-found: ignore

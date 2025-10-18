@@ -33,7 +33,7 @@ Detail-Runbooks in Vorbereitung (siehe Backlog).
 
 ## 3. Maintenance Tasks
 - **Wöchentlich**: Sandbox Cleanup, Audit-Log Archivierung, Telemetrie-Sampling überprüfen.  
-- **Monatlich**: RLS Policy Review, Rate-Limit Tuning, Security Tests (`pytest security/`).  
+- **Monatlich**: RLS Policy Review, Rate-Limit Tuning, Security Tests (`pytest tests/security/`).
 - **Quartalsweise**: Incident-Drills, Disaster Recovery Tests, Postgres Upgrade Evaluation.
 
 ---

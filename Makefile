@@ -1,7 +1,9 @@
-.PHONY: api-schema docker-build docker-up docker-down docker-logs docker-clean docker-rebuild help
+.PHONY: api-schema sbom slsa docker-build docker-up docker-down docker-logs docker-clean docker-rebuild help
 .PHONY: docker-dev-up docker-prod-up docker-prod-down
 
 API_SCHEMA_OUT ?= openapi.yaml
+SBOM_OUT ?= sbom.json
+SLSA_OUT ?= slsa.json
 DOCKER_COMPOSE = docker-compose -f docker/docker-compose.yml
 DOCKER_COMPOSE_DEV = docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml
 DOCKER_COMPOSE_PROD = docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml
@@ -12,6 +14,12 @@ DOCKER_COMPOSE_PROD = docker-compose -f docker/docker-compose.yml -f docker/dock
 # Generate OpenAPI schema
 api-schema:
 	python scripts/generate_openapi.py $(API_SCHEMA_OUT)
+
+sbom:
+	python scripts/generate_sbom.py $(SBOM_OUT)
+
+slsa:
+	python scripts/generate_slsa.py $(SLSA_OUT)
 
 # Docker targets
 docker-build: ## Build all Docker images

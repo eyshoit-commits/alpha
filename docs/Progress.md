@@ -8,7 +8,7 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 - Persistenz läuft aktuell über eine SQLite-Anbindung mit `bkg_db::Database`, die API-Schlüssel, Rotationen und Nutzungs-Timestamps dauerhaft speichert (`crates/cave-daemon/src/auth.rs:66-160`, `crates/bkg-db/src/lib.rs:45-228`). Die in der Architektur geforderte Postgres/RLS-Konfiguration ist weiterhin offen (`docs/architecture.md:16`).
 - Die erwarteten Web-UIs (`web/admin`, `web/app`) liegen nun als Next.js-Apps mit gemeinsamem API-Client und Navigation für Lifecycle/Telemetry vor (`web/admin/src/app`, `web/app/src/app`).
 - Dokumentation ist nur für Architektur, ENV-Variablen und Agentenleitfaden vorhanden; übrige Pflichtdokumente fehlen (`docs/architecture.md:13`, `docs/env.md:1`, `AGENTS.md:1`).
-- Build-/CI-Setup ist aktiv: `Makefile` liefert `make api-schema` für OpenAPI-Generierung (`Makefile:1-6`), und `.github/workflows/ci.yml` führt Formatierung, Linting, Tests, Schema-Checks sowie Supply-Chain-Schritte aus (`.github/workflows/ci.yml:1-164`). Playwright-E2E-Tests laufen in der `web-ui`-Jobkette über `npm run test:e2e` (`.github/workflows/ci.yml:97-123`). Offene Punkte: Security-Tests sind noch als Platzhalter hinterlegt, SLSA/Signierungsschritte bleiben teilweise TODO (`.github/workflows/ci.yml:124-187`).
+- Build-/CI-Setup ist aktiv: `Makefile` liefert `make api-schema` für OpenAPI-Generierung (`Makefile:1-6`), und `.github/workflows/ci.yml` führt Formatierung, Linting, Tests, Schema-Checks sowie Supply-Chain-Schritte aus (`.github/workflows/ci.yml:1-196`). Playwright-E2E-Tests laufen in der `web-ui`-Jobkette über `npm run test:e2e` (`.github/workflows/ci.yml:107-147`). Offene Punkte: SBOM-Signaturen benötigen Secrets, zusätzliche Security-Cases sind zu ergänzen (`.github/workflows/ci.yml:149-196`).
 - Governance-Themen wie Rotations-Webhook und Audit-Log-Streaming fehlen weiterhin; die Telemetrie-Policy wird inzwischen über `CAVE_OTEL_SAMPLING_RATE` im Daemon ausgewertet (`crates/cave-daemon/src/main.rs:48`).
 
 ## Phase-0 Verpflichtungen
@@ -22,7 +22,7 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 > Hinweis: Ohne abgeschlossene Phase-0 keine Aktivierung von P2P, Distributed Inference, Marketplace oder Multi-Agent-Features.
 
 ## Dokumentation & Templates
-- [x] `docs/security.md` erstellt (Threat-Matrix, CI-Hinweis auf `pytest security/`).  
+- [x] `docs/security.md` erstellt (Threat-Matrix, CI-Hinweis auf `pytest tests/security/`).
   Status: Erstfassung vorhanden; Tests & weitere Szenarien ergänzen.
 - [x] Fehlende Pflichtdokumente ergänzt:  
   `docs/api.md`, `docs/cli.md`, `docs/deployment.md`, `docs/operations.md`, `docs/testing.md`, `docs/governance.md`, `docs/compatibility.md`.  
@@ -37,17 +37,17 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 
 ## CI, Tests & Artefakte
 - [x] `make api-schema` in CI einbinden und `openapi-cli validate openapi.yaml` ausführen.
-  Status: `schema-and-security` Job ruft `make api-schema`, prüft via `git diff` und validiert das Ergebnis mit `openapi-cli validate` (`.github/workflows/ci.yml:56-91`).
+  Status: `api-schema` Job ruft `make api-schema`, prüft via `git diff` und validiert das Ergebnis mit `openapi-cli validate` (`.github/workflows/ci.yml:46-74`).
 - [x] `cave.yaml` Validierung im CI sicherstellen (`ajv validate -s schema/cave.schema.json -d cave.yaml`).
   Status: ajv-Validierung in CI vorhanden (überspringt, wenn `cave.yaml` fehlt).
 - [x] UI-E2E-Tests (Playwright) in CI einbinden.
   Status: `web-ui` Workflow-Job lintet/buildet beide Next.js-Apps und führt Playwright-Mocks der `/api/v1`-Flows aus (`.github/workflows/ci.yml`).
 - [ ] SBOM/SLSA Pipeline komplettieren: `make sbom`, `make slsa`, `cosign sign-blob <SBOM> --key cosign.key`; Secrets-Management dokumentieren.
-  Status: Workflow generiert SBOM/SLSA Placeholder + cosign Schritt (erfordert Schlüssel); Dokumentation in `docs/governance.md`.
+  Status: `supply-chain` Job ruft `make sbom`/`make slsa` auf und lädt Artefakte hoch; cosign Signatur weiterhin optional (`.github/workflows/ci.yml:149-196`).
 - [x] SQLite-Migrationen für Test-Harness idempotent absichern.
   Status: `Database::connect` toleriert doppelt ausgeführte Einträge in `_sqlx_migrations` (SQLite-Codes `1555`/`2067`), wodurch die Rotationstests grün laufen (`crates/bkg-db/src/lib.rs:65-76`, `crates/cave-daemon/src/main.rs:1025-1165`).
-- [ ] Threat-Matrix Tests (`pytest security/`) verpflichtend machen.
-  Status: Testsuite nicht vorhanden.
+- [x] Threat-Matrix Tests (`pytest tests/security/`) verpflichtend machen.
+  Status: `security-tests` Job setzt `pytest tests/security` um; weitere Szenarien folgen (`.github/workflows/ci.yml:83-106`).
 
 ## Governance & Betrieb
 - [x] Schlüssel-Rotation und Webhook-Handling implementieren (inkl. HMAC-Signaturprüfung, Audit-Logging).

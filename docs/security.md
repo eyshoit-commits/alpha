@@ -7,7 +7,7 @@ Maintainer: @bkgoder
 ---
 
 ## Zweck
-Threat-Matrix und Sicherheitsrichtlinien für BKG. CI muss `pytest security/` gegen die Matrix ausführen (siehe README §22).
+Threat-Matrix und Sicherheitsrichtlinien für BKG. CI muss `pytest tests/security/` gegen die Matrix ausführen (siehe README §22).
 
 ---
 
@@ -15,11 +15,11 @@ Threat-Matrix und Sicherheitsrichtlinien für BKG. CI muss `pytest security/` ge
 
 | Kategorie | Bedrohung | Auswirkung | Gegenmaßnahmen | Tests |
 |-----------|-----------|------------|----------------|-------|
-| Sandbox Isolation | Breakout via fehlende seccomp Regeln | Remote Code Execution auf Host | seccomp Profile, Namespaces, cgroups, FS Overlay | Integrationstest `tests/security/test_seccomp.py` (TODO) |
-| API Auth | Kompromittierte Namespace Keys | Cross-Tenant Access | Kurze TTLs, Rotation Webhook, RLS | `pytest security/test_auth.py` (TODO) |
-| Supply Chain | Manipulierte SBOM/SLSA Artefakte | Supply-Chain Angriff | cosign Signaturen, Sigstore Verification | `make sbom`, `make slsa`, `cosign verify` |
-| Telemetrie | Exfiltration über OTEL Export | Datenabfluss | Sampling Policy (`CAVE_OTEL_SAMPLING_RATE`), Exporter Egress-Allowlist | Beobachtung via OTEL Smoke Tests (TODO) |
-| Logging | Audit-Log Manipulation | Incident Response unmöglich | Signierte JSONL-Logs, WORM Storage | `pytest security/test_audit.py` (TODO) |
+| Sandbox Isolation | Breakout via fehlende seccomp Regeln | Remote Code Execution auf Host | seccomp Profile, Namespaces, cgroups, FS Overlay | `pytest tests/security/test_threat_matrix.py::test_category_mitigations_include_required_terms` |
+| API Auth | Kompromittierte Namespace Keys | Cross-Tenant Access | Kurze TTLs, Rotation Webhook, RLS | `pytest tests/security/test_threat_matrix.py::test_category_mitigations_include_required_terms` |
+| Supply Chain | Manipulierte SBOM/SLSA Artefakte | Supply-Chain Angriff | SBOM (Syft), SLSA Provenance, cosign Signaturen, Sigstore Verification | `make sbom`, `make slsa`, `cosign verify` |
+| Telemetrie | Exfiltration über OTEL Export | Datenabfluss | Sampling Policy (`CAVE_OTEL_SAMPLING_RATE`), Exporter Egress-Allowlist | `pytest tests/security/test_threat_matrix.py::test_threat_matrix_rows_have_test_references` |
+| Logging | Audit-Log Manipulation | Incident Response unmöglich | Signierte JSONL-Logs, WORM Storage | `pytest tests/security/test_threat_matrix.py::test_threat_matrix_rows_have_test_references` |
 
 > TODO: Ergänze weitere Zeilen (P2P Replikation, LLM Key Issuance, Storage Buckets, Realtime).
 
@@ -37,8 +37,8 @@ Threat-Matrix und Sicherheitsrichtlinien für BKG. CI muss `pytest security/` ge
 ---
 
 ## Security Testing Roadmap
-- [ ] Python Test-Suite in `security/` anlegen (`pytest`).  
-- [ ] Sektion in CI Workflow (`pytest security/`) aktivieren sobald Tests existieren.  
+- [x] Python Test-Suite in `tests/security/` anlegen (`pytest`).
+- [x] Sektion in CI Workflow (`pytest tests/security/`) aktivieren sobald Tests existieren.
 - [ ] Negative Tests: RLS Umgehung, Rate-Limit Bypass, Audit-Log Tampering.  
 - [ ] Penetration Test Plan (extern) vorbereiten, wenn Phase-0 abgeschlossen ist.
 
