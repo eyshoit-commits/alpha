@@ -205,7 +205,7 @@ impl AuditEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
 
     #[tokio::test]
     async fn writes_signed_entries() {

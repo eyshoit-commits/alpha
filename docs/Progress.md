@@ -60,7 +60,7 @@ Zuletzt synchronisiert mit `README.md` v1.8.2.
 - [ ] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.  
   Status: Keine Audit-Log-Writer implementiert.
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
-  Status: ProcessSandboxRuntime nutzt optional Bubblewrap, Seccomp/hardening fehlen (`crates/cave-kernel/src/lib.rs:425`).
+  Status: Der Prozess-Runtime setzt OverlayFS + Seccomp-Allowlist ohne Bubblewrap um (`crates/cave-kernel/src/lib.rs:660-1043`); fertige Bubblewrap-Profile zur Namespace-Härtung müssen noch ergänzt werden.
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  
   Status: Werte synchronisiert; Governance-Team hat Freigabe erteilt.
 

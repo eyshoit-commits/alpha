@@ -11,7 +11,7 @@ mod audit;
 mod isolation;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -31,7 +31,10 @@ use bkg_db::{
     SandboxStatus,
 };
 use chrono::Utc;
-use isolation::{add_pid_to_cgroup, cleanup_cgroup, prepare_cgroup};
+use isolation::{
+    add_pid_to_cgroup, apply_seccomp_filter, cleanup_cgroup, cleanup_overlay_dirs, mount_overlay,
+    prepare_cgroup, prepare_overlay_dirs, resolve_seccomp_numbers, unmount_overlay, OverlayDirs,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -78,8 +81,12 @@ impl Default for KernelConfig {
 pub struct IsolationSettings {
     pub enable_namespaces: bool,
     pub enable_cgroups: bool,
+    pub enable_overlayfs: bool,
+    pub enable_seccomp: bool,
     pub bubblewrap_path: Option<PathBuf>,
     pub cgroup_root: Option<PathBuf>,
+    pub seccomp_profile_path: Option<PathBuf>,
+    pub seccomp_allow_syscalls: Vec<String>,
     pub fallback_to_plain: bool,
     pub overlay: OverlayConfig,
     pub seccomp: Option<SeccompConfig>,
@@ -90,8 +97,12 @@ impl Default for IsolationSettings {
         Self {
             enable_namespaces: true,
             enable_cgroups: true,
+            enable_overlayfs: cfg!(target_os = "linux"),
+            enable_seccomp: cfg!(target_os = "linux"),
             bubblewrap_path: None,
             cgroup_root: Some(PathBuf::from("/sys/fs/cgroup/bkg")),
+            seccomp_profile_path: None,
+            seccomp_allow_syscalls: Vec::new(),
             fallback_to_plain: true,
             overlay: OverlayConfig::default(),
             seccomp: None,
@@ -597,6 +608,17 @@ impl ProcessSandboxRuntime {
             None => None,
         };
 
+        let (seccomp_allowlist, seccomp_numbers) = if isolation.enable_seccomp {
+            let allowlist = Arc::new(build_seccomp_allowlist(&isolation));
+            let numbers = resolve_seccomp_numbers(allowlist.as_ref())
+                .with_context(|| "resolving seccomp allowlist to numeric identifiers")?;
+            (Some(allowlist), Some(Arc::new(numbers)))
+        } else {
+            (None, None)
+        };
+
+        let seccomp_profile_path = isolation.seccomp_profile_path.clone();
+
         let inner = ProcessRuntimeInner {
             isolation,
             bubblewrap_path,
@@ -707,6 +729,16 @@ impl SandboxRuntime for ProcessSandboxRuntime {
     }
 
     async fn destroy(&self, sandbox_id: Uuid, workspace: &Path) -> Result<()> {
+        if self.inner.isolation.enable_overlayfs {
+            if let Err(err) = cleanup_overlay_dirs(workspace).await {
+                warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %err,
+                    "failed to cleanup overlay directories"
+                );
+            }
+        }
+
         if fs::metadata(workspace).await.is_ok() {
             fs::remove_dir_all(workspace).await?;
         }
@@ -808,7 +840,23 @@ impl SandboxInstance for ProcessSandboxInstance {
         command.stderr(std::process::Stdio::piped());
 
         let start = Instant::now();
-        let mut child = command.spawn()?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                if overlay_mounted {
+                    if let Some(dirs) = self.overlay.as_ref() {
+                        if let Err(unmount_err) = unmount_overlay(dirs) {
+                            warn!(
+                                sandbox = %self.sandbox_id,
+                                error = %unmount_err,
+                                "failed to unmount overlay after spawn error"
+                            );
+                        }
+                    }
+                }
+                return Err(err.into());
+            }
+        };
 
         if let Some(path) = self.cgroup_path.as_ref() {
             if let Some(pid) = child.id() {
@@ -827,7 +875,7 @@ impl SandboxInstance for ProcessSandboxInstance {
         let wait_future = child.wait_with_output();
         tokio::pin!(wait_future);
 
-        match tokio::time::timeout(timeout, wait_future.as_mut()).await {
+        let result = match tokio::time::timeout(timeout, wait_future.as_mut()).await {
             Ok(result) => {
                 let output = result?;
                 let duration = start.elapsed();
@@ -842,13 +890,14 @@ impl SandboxInstance for ProcessSandboxInstance {
                     Some(String::from_utf8_lossy(&output.stderr).to_string())
                 };
 
-                Ok(ExecOutcome {
+                let outcome = ExecOutcome {
                     exit_code: output.status.code(),
                     stdout,
                     stderr,
                     duration,
                     timed_out: false,
-                })
+                };
+                Ok(outcome)
             }
             Err(_) => {
                 warn!(sandbox = %self.sandbox_id, "execution timed out, terminating process");
@@ -860,7 +909,17 @@ impl SandboxInstance for ProcessSandboxInstance {
                     timed_out: true,
                 })
             }
+        };
+
+        if overlay_mounted {
+            if let Some(dirs) = self.overlay.as_ref() {
+                if let Err(err) = unmount_overlay(dirs) {
+                    warn!(sandbox = %self.sandbox_id, error = %err, "failed to unmount overlay");
+                }
+            }
         }
+
+        result
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1206,6 +1265,7 @@ fn build_bubblewrap_command(
     workspace_root: &Path,
     execution_root: &Path,
     sandbox_id: Uuid,
+    seccomp_profile: Option<&Path>,
 ) -> Command {
     let mut command = Command::new(bwrap_path);
     command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
@@ -1247,6 +1307,10 @@ fn build_bubblewrap_command(
         .arg("--setenv")
         .arg("BKG_SANDBOX_ROOT")
         .arg(workspace_root);
+
+    if let Some(profile) = seccomp_profile {
+        command.arg("--seccomp").arg(profile);
+    }
 
     command.arg("--");
     command.arg(&request.command);
