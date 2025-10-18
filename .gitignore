@@ -1,0 +1,11 @@
+# Ignore Rust build output
+target/
+
+# Editor and tooling artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env files
+.env
