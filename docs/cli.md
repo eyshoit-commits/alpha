@@ -17,7 +17,7 @@ Maintainer: @bkgoder
 - `bkg exe --image <runtime>` – Einmaliger Sandbox-Lauf.  
 - `bkgr` – Persistent Sandbox (Quick Connect).  
 - `bkg schema validate` – `cave.yaml` gegen `schema/cave.schema.json` prüfen (TODO implementieren).  
-- `bkg auth rotate` – Schlüsselrotation auslösen (Webhook Trigger).
+- `bkg auth rotate` – Schlüsselrotation auslösen, gibt neues Token + `rotated_from`/`rotated_at` Metadaten und die HMAC-Signatur des Webhook-Events (`event_id`, `signature`).
 
 ## Admin CLI (`cavectl`)
 - `cavectl sandbox list|start|stop` – Verwaltungsbefehle (Admin-Scope erforderlich).  

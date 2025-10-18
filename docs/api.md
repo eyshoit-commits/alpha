@@ -14,9 +14,10 @@ REST, WebSocket und pgwire Schnittstellenübersicht für die BKG-Plattform. Erg�
 ## HTTP Endpunkte (Auszug)
 - `/api/v1/sandboxes` – POST (create), GET (list).  
 - `/api/v1/sandboxes/{id}/start|exec|stop|status|executions` – Lifecycle.  
-- `/api/v1/auth/keys` – Issue/List.  
-- `/api/v1/auth/keys/{id}` – DELETE revoke.  
-- `/api/v1/auth/keys/rotated` – Webhook (HMAC).  
+- `/api/v1/auth/keys` – Issue/List.
+- `/api/v1/auth/keys/{id}` – DELETE revoke.
+- `/api/v1/auth/keys/rotate` – Admin-only rotation flow. Body accepts `key_id`, optional `rate_limit` and `ttl_seconds`. Response returns the new token, metadata (`info.rotated_from`, `info.rotated_at`) and queued webhook event (`webhook.event_id`, `webhook.signature`, `webhook.payload`).
+- `/api/v1/auth/keys/rotated` – Rotation webhook verification endpoint. Requires admin bearer token plus `X-Cave-Webhook-Signature` header (Base64 HMAC-SHA256) and the JSON payload containing `key_id`, `previous_key_id`, `rotated_at`, `scope`, `owner`, `key_prefix`.
 - `/api/v1/admin/llm/models/*` – Admin LLM Management.  
 - `/healthz`, `/metrics` – Liveness/Telemetry.
 
