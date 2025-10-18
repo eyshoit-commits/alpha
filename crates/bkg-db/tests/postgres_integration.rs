@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres};
 use tempfile::tempdir;
 
 use bkg_db::{
@@ -18,6 +18,35 @@ fn claims(subject: &str, scope: &str) -> serde_json::Value {
         "subject": subject,
         "scope": scope
     })
+}
+
+#[sqlx::test(migrations = "./migrations_postgres")]
+async fn seeds_are_installed(pool: PgPool) -> Result<()> {
+    let namespaces =
+        sqlx::query_scalar::<Postgres, String>("SELECT code FROM namespaces ORDER BY code")
+            .fetch_all(&pool)
+            .await?;
+    assert!(namespaces.contains(&"namespace:alpha".to_string()));
+    assert!(namespaces.contains(&"namespace:beta".to_string()));
+
+    let prefixes = sqlx::query_scalar::<Postgres, String>(
+        "SELECT token_prefix FROM api_keys ORDER BY token_prefix",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(prefixes.contains(&"adm-seed".to_string()));
+    assert!(prefixes.contains(&"ns-alpha".to_string()));
+    assert!(prefixes.contains(&"ns-beta".to_string()));
+
+    let policies = sqlx::query_scalar::<Postgres, String>(
+        "SELECT policy_name FROM rls_policies WHERE table_name = $1",
+    )
+    .bind("sandboxes")
+    .fetch_all(&pool)
+    .await?;
+    assert!(policies.contains(&"namespace_scope".to_string()));
+
+    Ok(())
 }
 
 #[sqlx::test(migrations = "./migrations_postgres")]
