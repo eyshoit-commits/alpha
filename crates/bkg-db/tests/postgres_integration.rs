@@ -7,6 +7,7 @@ use tempfile::tempdir;
 
 use bkg_db::{
     api::{EmbeddedRestApi, RestApiServer},
+    auth::JwtHmacAuth,
     executor::{ExecutionContext, ScalarValue},
     kernel::InMemoryStorageEngine,
     rls::DatabasePolicyEngine,
@@ -65,7 +66,8 @@ async fn namespace_isolation_enforced(_pool: PgPool) -> Result<()> {
 
     let engine = Arc::new(DatabasePolicyEngine::new(database.clone()));
     let context = ExecutionContext::new(InMemoryStorageEngine::new());
-    let api = EmbeddedRestApi::new(database.clone(), context, engine.clone());
+    let auth = Arc::new(JwtHmacAuth::new("integration-secret"));
+    let api = EmbeddedRestApi::new(database.clone(), context, engine.clone(), auth.clone());
 
     api.handle_query(json!({
         "sql": "INSERT INTO projects (id, namespace, name) VALUES (1, 'namespace:alpha', 'Alpha')",
@@ -169,7 +171,8 @@ async fn wal_recovery_with_postgres_policies(_pool: PgPool) -> Result<()> {
     let wal_path = dir.path().join("api.wal");
     let storage = InMemoryStorageEngine::with_file_wal(&wal_path)?;
     let context = ExecutionContext::new(storage.clone());
-    let api = EmbeddedRestApi::new(database.clone(), context, engine.clone());
+    let auth = Arc::new(JwtHmacAuth::new("integration-secret"));
+    let api = EmbeddedRestApi::new(database.clone(), context, engine.clone(), auth.clone());
 
     api.handle_query(json!({
         "sql": "INSERT INTO projects (id, namespace, name) VALUES (10, 'namespace:alpha', 'Alpha')",
@@ -181,7 +184,7 @@ async fn wal_recovery_with_postgres_policies(_pool: PgPool) -> Result<()> {
 
     let reloaded_storage = InMemoryStorageEngine::with_file_wal(&wal_path)?;
     let reloaded_context = ExecutionContext::try_new(reloaded_storage)?;
-    let reloaded_api = EmbeddedRestApi::new(database, reloaded_context, engine);
+    let reloaded_api = EmbeddedRestApi::new(database, reloaded_context, engine, auth);
 
     let rows = reloaded_api
         .handle_query(json!({
