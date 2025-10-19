@@ -40,6 +40,8 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::audit::{AuditLogWriter, AuditRecord};
+
 /// Default SQLite busy timeout in milliseconds when the DB is under load.
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -55,6 +57,7 @@ pub enum DatabaseDriver {
 pub struct Database {
     pool: AnyPool,
     driver: DatabaseDriver,
+    audit_writer: Option<Arc<dyn AuditLogWriter>>,
 }
 
 impl Database {
@@ -101,7 +104,11 @@ impl Database {
             }
         }
 
-        Ok(Self { pool, driver })
+        Ok(Self {
+            pool,
+            driver,
+            audit_writer: None,
+        })
     }
 
     /// Connects to a file path via `sqlite://` scheme.
@@ -119,6 +126,25 @@ impl Database {
     /// Returns the configured driver for this database handle.
     pub fn driver(&self) -> DatabaseDriver {
         self.driver
+    }
+
+    /// Attaches an audit log writer to this database handle.
+    pub fn with_audit_writer(mut self, writer: Arc<dyn AuditLogWriter>) -> Self {
+        self.audit_writer = Some(writer);
+        self
+    }
+
+    /// Returns the configured audit writer, if any.
+    pub fn audit_writer(&self) -> Option<Arc<dyn AuditLogWriter>> {
+        self.audit_writer.clone()
+    }
+
+    /// Emits an audit record to the configured writer, if present.
+    pub fn emit_audit(&self, record: AuditRecord) -> Result<()> {
+        if let Some(writer) = &self.audit_writer {
+            writer.append(&record)?;
+        }
+        Ok(())
     }
 
     /// Retrieves an API key by identifier.

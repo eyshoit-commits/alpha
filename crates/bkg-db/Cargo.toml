@@ -20,6 +20,10 @@ uuid.workspace = true
 futures.workspace = true
 sqlparser.workspace = true
 jsonwebtoken.workspace = true
+base64 = "0.21"
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+jsonschema = "0.17"
