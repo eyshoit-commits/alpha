@@ -34,7 +34,7 @@ use sqlx::{
     any::{AnyPoolOptions, AnyRow},
     migrate::MigrateError,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    AnyPool, Row, SqlitePool,
+    AnyPool, QueryBuilder, Row, SqlitePool,
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -860,6 +860,563 @@ impl Database {
         }
         Ok(out)
     }
+
+    /// Lists all registered models ordered by creation time descending.
+    pub async fn list_models(&self) -> Result<Vec<ModelRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM models ORDER BY created_at DESC",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                name,
+                provider,
+                version,
+                format,
+                source_uri,
+                checksum_sha256,
+                size_bytes,
+                stage,
+                last_synced_at::text AS last_synced_at,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at,
+                tags::text AS tags,
+                error_message
+            FROM models
+            ORDER BY created_at DESC
+            "#
+            }
+        };
+        let mut rows = sqlx::query(query).fetch(&self.pool);
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_model(row)?);
+        }
+        Ok(out)
+    }
+
+    /// Searches for a model with the provided name and version.
+    pub async fn find_model_by_name_version(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<ModelRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM models WHERE name = ? AND version = ?",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                name,
+                provider,
+                version,
+                format,
+                source_uri,
+                checksum_sha256,
+                size_bytes,
+                stage,
+                last_synced_at::text AS last_synced_at,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at,
+                tags::text AS tags,
+                error_message
+            FROM models
+            WHERE name = $1 AND version = $2
+            "#
+            }
+        };
+        let row = sqlx::query(query)
+            .bind(name)
+            .bind(version)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(map_model).transpose()
+    }
+
+    /// Persists a new model entry and returns the stored record.
+    pub async fn create_model(&self, new: NewModel<'_>) -> Result<ModelRecord> {
+        let NewModel {
+            name,
+            provider,
+            version,
+            format,
+            source_uri,
+            checksum_sha256,
+            size_bytes,
+            tags,
+            stage,
+            error_message,
+        } = new;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let now_str = encode_datetime(now);
+        let tags_json = tags
+            .map(|items| serde_json::to_string(items).context("serialize model tags"))
+            .transpose()?;
+        let size_value = size_bytes.map(|value| value as i64);
+        let stage_value = stage.as_str();
+        let last_synced: Option<String> = None;
+
+        match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query(
+                    r#"
+                INSERT INTO models (
+                    id, name, provider, version, format, source_uri,
+                    checksum_sha256, size_bytes, stage, last_synced_at,
+                    created_at, updated_at, tags, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(name)
+                .bind(provider)
+                .bind(version)
+                .bind(format)
+                .bind(source_uri)
+                .bind(checksum_sha256)
+                .bind(size_value)
+                .bind(stage_value)
+                .bind(last_synced.clone())
+                .bind(now_str.clone())
+                .bind(now_str.clone())
+                .bind(tags_json.clone())
+                .bind(error_message)
+                .execute(&self.pool)
+                .await?;
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(
+                    r#"
+                INSERT INTO models (
+                    id, name, provider, version, format, source_uri,
+                    checksum_sha256, size_bytes, stage, last_synced_at,
+                    created_at, updated_at, tags, error_message
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7, $8, $9, $10, $11, $12, $13, $14
+                )
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(name)
+                .bind(provider)
+                .bind(version)
+                .bind(format)
+                .bind(source_uri)
+                .bind(checksum_sha256)
+                .bind(size_value)
+                .bind(stage_value)
+                .bind(last_synced.clone())
+                .bind(now_str.clone())
+                .bind(now_str.clone())
+                .bind(tags_json.clone())
+                .bind(error_message)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        self.fetch_model(id).await?.ok_or_else(|| {
+            anyhow!(
+                "model inserted but missing when reloaded (name={}, version={})",
+                name,
+                version
+            )
+        })
+    }
+
+    /// Retrieves a model by identifier.
+    pub async fn fetch_model(&self, id: Uuid) -> Result<Option<ModelRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM models WHERE id = ?",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                name,
+                provider,
+                version,
+                format,
+                source_uri,
+                checksum_sha256,
+                size_bytes,
+                stage,
+                last_synced_at::text AS last_synced_at,
+                created_at::text AS created_at,
+                updated_at::text AS updated_at,
+                tags::text AS tags,
+                error_message
+            FROM models
+            WHERE id = $1
+            "#
+            }
+        };
+        let row = sqlx::query(query)
+            .bind(encode_uuid(id))
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(map_model).transpose()
+    }
+
+    /// Updates the stage and bookkeeping metadata for a model.
+    pub async fn update_model_stage(
+        &self,
+        id: Uuid,
+        stage: ModelStage,
+        error_message: Option<&str>,
+        last_synced_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<ModelRecord>> {
+        let stage_value = stage.as_str();
+        let updated_at = Utc::now();
+        let updated_str = encode_datetime(updated_at);
+        let last_synced_str = encode_optional_datetime(last_synced_at);
+
+        let result = match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query(
+                    r#"
+                UPDATE models
+                SET stage = ?, error_message = ?, last_synced_at = ?, updated_at = ?
+                WHERE id = ?
+                "#,
+                )
+                .bind(stage_value)
+                .bind(error_message)
+                .bind(last_synced_str.clone())
+                .bind(updated_str.clone())
+                .bind(encode_uuid(id))
+                .execute(&self.pool)
+                .await?
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(
+                    r#"
+                UPDATE models
+                SET stage = $1, error_message = $2, last_synced_at = $3, updated_at = $4
+                WHERE id = $5
+                "#,
+                )
+                .bind(stage_value)
+                .bind(error_message)
+                .bind(last_synced_str.clone())
+                .bind(updated_str.clone())
+                .bind(encode_uuid(id))
+                .execute(&self.pool)
+                .await?
+            }
+        };
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.fetch_model(id).await
+    }
+
+    /// Removes a model and its associated jobs.
+    pub async fn delete_model(&self, id: Uuid) -> Result<bool> {
+        let result = match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query("DELETE FROM models WHERE id = ?")
+                    .bind(encode_uuid(id))
+                    .execute(&self.pool)
+                    .await?
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query("DELETE FROM models WHERE id = $1")
+                    .bind(encode_uuid(id))
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Inserts a new model download job entry.
+    pub async fn insert_model_job(&self, job: NewModelJob<'_>) -> Result<ModelDownloadJobRecord> {
+        let NewModelJob {
+            model_id,
+            stage,
+            progress,
+            started_at,
+            finished_at,
+            error_message,
+        } = job;
+
+        let id = Uuid::new_v4();
+        let started_str = encode_datetime(started_at);
+        let finished_str = encode_optional_datetime(finished_at);
+        let stage_value = stage.as_str();
+
+        match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query(
+                    r#"
+                INSERT INTO model_jobs (
+                    id, model_id, stage, progress, started_at, finished_at, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(encode_uuid(model_id))
+                .bind(stage_value)
+                .bind(progress as f64)
+                .bind(started_str.clone())
+                .bind(finished_str.clone())
+                .bind(error_message)
+                .execute(&self.pool)
+                .await?;
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(
+                    r#"
+                INSERT INTO model_jobs (
+                    id, model_id, stage, progress, started_at, finished_at, error_message
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(encode_uuid(model_id))
+                .bind(stage_value)
+                .bind(progress as f64)
+                .bind(started_str.clone())
+                .bind(finished_str.clone())
+                .bind(error_message)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        self.fetch_model_job(id)
+            .await?
+            .ok_or_else(|| anyhow!("model job inserted but missing (model_id={})", model_id))
+    }
+
+    /// Returns download/refresh jobs for a model ordered by newest first.
+    pub async fn list_model_jobs(&self, model_id: Uuid) -> Result<Vec<ModelDownloadJobRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => {
+                r#"
+            SELECT * FROM model_jobs
+            WHERE model_id = ?
+            ORDER BY started_at DESC
+            "#
+            }
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                model_id::text AS model_id,
+                stage,
+                progress,
+                started_at::text AS started_at,
+                finished_at::text AS finished_at,
+                error_message
+            FROM model_jobs
+            WHERE model_id = $1
+            ORDER BY started_at DESC
+            "#
+            }
+        };
+
+        let mut rows = sqlx::query(query)
+            .bind(encode_uuid(model_id))
+            .fetch(&self.pool);
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_model_job(row)?);
+        }
+        Ok(out)
+    }
+
+    async fn fetch_model_job(&self, id: Uuid) -> Result<Option<ModelDownloadJobRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM model_jobs WHERE id = ?",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                model_id::text AS model_id,
+                stage,
+                progress,
+                started_at::text AS started_at,
+                finished_at::text AS finished_at,
+                error_message
+            FROM model_jobs
+            WHERE id = $1
+            "#
+            }
+        };
+
+        let row = sqlx::query(query)
+            .bind(encode_uuid(id))
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(map_model_job).transpose()
+    }
+
+    /// Persists an audit event entry.
+    pub async fn create_audit_event(&self, event: NewAuditEvent<'_>) -> Result<AuditEventRecord> {
+        let NewAuditEvent {
+            namespace,
+            actor,
+            event_type,
+            recorded_at,
+            payload,
+            signature_valid,
+        } = event;
+
+        let id = Uuid::new_v4();
+        let recorded_str = encode_datetime(recorded_at);
+        let payload_json = serde_json::to_string(payload).context("serialize audit payload")?;
+
+        match self.driver {
+            DatabaseDriver::Sqlite => {
+                sqlx::query(
+                    r#"
+                INSERT INTO audit_events (
+                    id, namespace, actor, event_type, recorded_at, payload, signature_valid
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(namespace)
+                .bind(actor)
+                .bind(event_type)
+                .bind(recorded_str.clone())
+                .bind(payload_json.clone())
+                .bind(signature_valid)
+                .execute(&self.pool)
+                .await?;
+            }
+            DatabaseDriver::Postgres => {
+                sqlx::query(
+                    r#"
+                INSERT INTO audit_events (
+                    id, namespace, actor, event_type, recorded_at, payload, signature_valid
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+                )
+                .bind(encode_uuid(id))
+                .bind(namespace)
+                .bind(actor)
+                .bind(event_type)
+                .bind(recorded_str.clone())
+                .bind(payload_json.clone())
+                .bind(signature_valid)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+
+        self.fetch_audit_event(id).await?.ok_or_else(|| {
+            anyhow!(
+                "audit event inserted but missing (event_type={})",
+                event_type
+            )
+        })
+    }
+
+    /// Lists audit events applying optional filters.
+    pub async fn list_audit_events(
+        &self,
+        filters: AuditEventFilters<'_>,
+    ) -> Result<Vec<AuditEventRecord>> {
+        let select = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM audit_events",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                namespace,
+                actor,
+                event_type,
+                recorded_at::text AS recorded_at,
+                payload::text AS payload,
+                signature_valid
+            FROM audit_events
+            "#
+            }
+        };
+
+        let mut builder = QueryBuilder::new(select);
+        let mut has_where = false;
+
+        if let Some(namespace) = filters.namespace {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("namespace = ");
+            builder.push_bind(namespace);
+        }
+
+        if let Some(actor) = filters.actor {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("actor = ");
+            builder.push_bind(actor);
+        }
+
+        if let Some(event_type) = filters.event_type {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("event_type = ");
+            builder.push_bind(event_type);
+        }
+
+        if let Some(since) = filters.since {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("recorded_at >= ");
+            builder.push_bind(encode_datetime(since));
+        }
+
+        if let Some(until) = filters.until {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("recorded_at <= ");
+            builder.push_bind(encode_datetime(until));
+        }
+
+        builder.push(" ORDER BY recorded_at DESC");
+        let limit = filters.limit.unwrap_or(100).max(1) as i64;
+        builder.push(" LIMIT ");
+        builder.push_bind(limit);
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut out = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            out.push(map_audit_event(row)?);
+        }
+        Ok(out)
+    }
+
+    async fn fetch_audit_event(&self, id: Uuid) -> Result<Option<AuditEventRecord>> {
+        let query = match self.driver {
+            DatabaseDriver::Sqlite => "SELECT * FROM audit_events WHERE id = ?",
+            DatabaseDriver::Postgres => {
+                r#"
+            SELECT
+                id::text AS id,
+                namespace,
+                actor,
+                event_type,
+                recorded_at::text AS recorded_at,
+                payload::text AS payload,
+                signature_valid
+            FROM audit_events
+            WHERE id = $1
+            "#
+            }
+        };
+
+        let row = sqlx::query(query)
+            .bind(encode_uuid(id))
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(map_audit_event).transpose()
+    }
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
@@ -959,6 +1516,42 @@ fn decode_optional_string(row: &AnyRow, column: &str) -> Result<Option<String>> 
     }
 }
 
+fn decode_optional_string_list(row: &AnyRow, column: &str) -> Result<Option<Vec<String>>> {
+    match row.try_get::<String, _>(column) {
+        Ok(value) => {
+            if value.is_empty() {
+                Ok(Some(Vec::new()))
+            } else {
+                serde_json::from_str(&value)
+                    .with_context(|| format!("failed to deserialize JSON array column '{column}'"))
+                    .map(Some)
+            }
+        }
+        Err(err) if is_unexpected_null(&err) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn decode_optional_bool(row: &AnyRow, column: &str) -> Result<Option<bool>> {
+    match row.try_get::<Option<bool>, _>(column) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let raw: Option<i64> = row.try_get(column)?;
+            Ok(raw.map(|value| value != 0))
+        }
+    }
+}
+
+fn decode_f32(row: &AnyRow, column: &str) -> Result<f32> {
+    match row.try_get::<f32, _>(column) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let raw: f64 = row.try_get(column)?;
+            Ok(raw as f32)
+        }
+    }
+}
+
 fn map_sandbox(row: AnyRow) -> Result<SandboxRecord> {
     let status: String = row.try_get("status")?;
     let id = parse_uuid(row.try_get::<String, _>("id")?)?;
@@ -1006,6 +1599,59 @@ fn map_execution(row: AnyRow) -> Result<ExecutionRecord> {
         stderr: decode_optional_string(&row, "stderr")?,
         duration_ms: row.try_get::<i64, _>("duration_ms")? as u64,
         timed_out: decode_bool(&row, "timed_out")?,
+    })
+}
+
+fn map_model(row: AnyRow) -> Result<ModelRecord> {
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
+    let stage: String = row.try_get("stage")?;
+    Ok(ModelRecord {
+        id,
+        name: row.try_get("name")?,
+        provider: row.try_get("provider")?,
+        version: row.try_get("version")?,
+        format: row.try_get("format")?,
+        source_uri: row.try_get("source_uri")?,
+        checksum_sha256: decode_optional_string(&row, "checksum_sha256")?,
+        size_bytes: row
+            .try_get::<Option<i64>, _>("size_bytes")?
+            .map(|value| value as u64),
+        stage: ModelStage::from_str(&stage)?,
+        last_synced_at: decode_optional_datetime(&row, "last_synced_at")?,
+        created_at: decode_datetime(&row, "created_at")?,
+        updated_at: decode_datetime(&row, "updated_at")?,
+        tags: decode_optional_string_list(&row, "tags")?,
+        error_message: decode_optional_string(&row, "error_message")?,
+    })
+}
+
+fn map_model_job(row: AnyRow) -> Result<ModelDownloadJobRecord> {
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
+    let model_id = parse_uuid(row.try_get::<String, _>("model_id")?)?;
+    let stage: String = row.try_get("stage")?;
+    Ok(ModelDownloadJobRecord {
+        id,
+        model_id,
+        stage: ModelStage::from_str(&stage)?,
+        progress: decode_f32(&row, "progress")?,
+        started_at: decode_datetime(&row, "started_at")?,
+        finished_at: decode_optional_datetime(&row, "finished_at")?,
+        error_message: decode_optional_string(&row, "error_message")?,
+    })
+}
+
+fn map_audit_event(row: AnyRow) -> Result<AuditEventRecord> {
+    let id = parse_uuid(row.try_get::<String, _>("id")?)?;
+    let payload_json: String = row.try_get("payload")?;
+    Ok(AuditEventRecord {
+        id,
+        namespace: decode_optional_string(&row, "namespace")?,
+        actor: decode_optional_string(&row, "actor")?,
+        event_type: row.try_get("event_type")?,
+        recorded_at: decode_datetime(&row, "recorded_at")?,
+        payload: serde_json::from_str(&payload_json)
+            .context("failed to deserialize audit payload")?,
+        signature_valid: decode_optional_bool(&row, "signature_valid")?,
     })
 }
 
@@ -1118,6 +1764,54 @@ pub struct NewSandbox<'a> {
     pub timeout_seconds: u32,
 }
 
+/// Input payload for creating a new model entry.
+#[derive(Debug, Clone)]
+pub struct NewModel<'a> {
+    pub name: &'a str,
+    pub provider: &'a str,
+    pub version: &'a str,
+    pub format: &'a str,
+    pub source_uri: &'a str,
+    pub checksum_sha256: Option<&'a str>,
+    pub size_bytes: Option<u64>,
+    pub tags: Option<&'a [String]>,
+    pub stage: ModelStage,
+    pub error_message: Option<&'a str>,
+}
+
+/// Input payload for recording model job progress.
+#[derive(Debug, Clone)]
+pub struct NewModelJob<'a> {
+    pub model_id: Uuid,
+    pub stage: ModelStage,
+    pub progress: f32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub error_message: Option<&'a str>,
+}
+
+/// Input payload for persisting audit events.
+#[derive(Debug, Clone)]
+pub struct NewAuditEvent<'a> {
+    pub namespace: Option<&'a str>,
+    pub actor: Option<&'a str>,
+    pub event_type: &'a str,
+    pub recorded_at: DateTime<Utc>,
+    pub payload: &'a Value,
+    pub signature_valid: Option<bool>,
+}
+
+/// Filters applied when listing audit events.
+#[derive(Debug, Clone, Default)]
+pub struct AuditEventFilters<'a> {
+    pub namespace: Option<&'a str>,
+    pub event_type: Option<&'a str>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub limit: Option<u32>,
+    pub actor: Option<&'a str>,
+}
+
 impl<'a> NewSandbox<'a> {
     pub fn with_limits(
         namespace: &'a str,
@@ -1178,6 +1872,93 @@ pub struct ExecutionRecord {
     pub stderr: Option<String>,
     pub duration_ms: u64,
     pub timed_out: bool,
+}
+
+/// Enumerates all lifecycle stages for model downloads/registrations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStage {
+    Unknown,
+    Registered,
+    Queued,
+    Downloading,
+    Verifying,
+    Ready,
+    Failed,
+}
+
+impl ModelStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelStage::Unknown => "unknown",
+            ModelStage::Registered => "registered",
+            ModelStage::Queued => "queued",
+            ModelStage::Downloading => "downloading",
+            ModelStage::Verifying => "verifying",
+            ModelStage::Ready => "ready",
+            ModelStage::Failed => "failed",
+        }
+    }
+}
+
+impl FromStr for ModelStage {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "unknown" => Ok(ModelStage::Unknown),
+            "registered" => Ok(ModelStage::Registered),
+            "queued" => Ok(ModelStage::Queued),
+            "downloading" => Ok(ModelStage::Downloading),
+            "verifying" => Ok(ModelStage::Verifying),
+            "ready" => Ok(ModelStage::Ready),
+            "failed" => Ok(ModelStage::Failed),
+            other => Err(anyhow!("unknown model stage: {other}")),
+        }
+    }
+}
+
+/// Persisted metadata row for registered models.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub version: String,
+    pub format: String,
+    pub source_uri: String,
+    pub size_bytes: Option<u64>,
+    pub checksum_sha256: Option<String>,
+    pub stage: ModelStage,
+    pub last_synced_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub tags: Option<Vec<String>>,
+    pub error_message: Option<String>,
+}
+
+/// Download or refresh job metadata tied to a model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelDownloadJobRecord {
+    pub id: Uuid,
+    pub model_id: Uuid,
+    pub stage: ModelStage,
+    pub progress: f32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+}
+
+/// Stored audit event entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditEventRecord {
+    pub id: Uuid,
+    pub namespace: Option<String>,
+    pub actor: Option<String>,
+    pub event_type: String,
+    pub recorded_at: DateTime<Utc>,
+    pub payload: Value,
+    pub signature_valid: Option<bool>,
 }
 
 /// Queued webhook event awaiting delivery.

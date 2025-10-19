@@ -115,6 +115,54 @@ def rotated_key_example() -> Dict[str, Any]:
     }
 
 
+def model_record_example() -> Dict[str, Any]:
+    return {
+        "id": "f3f5b6c4-9a62-4d1a-9da3-21b9a5b27f41",
+        "name": "phi-3",
+        "provider": "open-model",
+        "version": "1.0.0",
+        "format": "gguf",
+        "source_uri": "https://example.com/models/phi-3.gguf",
+        "checksum_sha256": "d2c7e95e1a1d4cbb7e1e5b6f13fd8e05de0b4d8717b4c2a38a7f1bbf3b189e0c",
+        "size_bytes": 1_572_864_000,
+        "stage": "registered",
+        "last_synced_at": None,
+        "created_at": "2025-10-19T09:15:00Z",
+        "updated_at": "2025-10-19T09:15:00Z",
+        "tags": ["text", "demo"],
+        "error_message": None,
+    }
+
+
+def model_job_example() -> Dict[str, Any]:
+    return {
+        "id": "9f5a64a8-6c70-4e55-8b77-55c932677d4f",
+        "model_id": model_record_example()["id"],
+        "stage": "queued",
+        "progress": 0.25,
+        "started_at": "2025-10-19T09:16:00Z",
+        "finished_at": None,
+        "error_message": None,
+    }
+
+
+def audit_event_example() -> Dict[str, Any]:
+    return {
+        "id": "3bfe5601-3d0d-45a9-9a8c-5b99c5fc6743",
+        "namespace": None,
+        "actor": "admin-key-123",
+        "event_type": "model.registered",
+        "recorded_at": "2025-10-19T09:15:01Z",
+        "payload": {
+            "model_id": model_record_example()["id"],
+            "name": "phi-3",
+            "provider": "open-model",
+            "version": "1.0.0",
+        },
+        "signature_valid": None,
+    }
+
+
 def error_example(message: str) -> Dict[str, Any]:
     return {"error": message}
 
@@ -320,6 +368,123 @@ def build_spec() -> Dict[str, Any]:
                     "rotated_at": {"type": "string", "format": "date-time", "nullable": True},
                 },
                 "example": issued_key_example()["info"],
+            },
+            "ModelStage": {
+                "type": "string",
+                "enum": [
+                    "unknown",
+                    "registered",
+                    "queued",
+                    "downloading",
+                    "verifying",
+                    "ready",
+                    "failed",
+                ],
+                "description": "Lifecycle state for model registration and download jobs.",
+            },
+            "RegisterModelRequest": {
+                "type": "object",
+                "required": ["name", "provider", "version", "format", "source_uri"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "version": {"type": "string"},
+                    "format": {"type": "string", "description": "Distribution format (e.g. gguf, safetensors)."},
+                    "source_uri": {"type": "string", "format": "uri"},
+                    "checksum_sha256": {
+                        "type": "string",
+                        "description": "Optional SHA-256 checksum for integrity validation.",
+                    },
+                    "size_bytes": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "Approximate download size in bytes.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional labels for filtering.",
+                    },
+                },
+                "example": {
+                    "name": "phi-3",
+                    "provider": "open-model",
+                    "version": "1.0.0",
+                    "format": "gguf",
+                    "source_uri": "https://example.com/models/phi-3.gguf",
+                    "tags": ["text", "demo"],
+                },
+            },
+            "ModelRecord": {
+                "type": "object",
+                "required": [
+                    "id",
+                    "name",
+                    "provider",
+                    "version",
+                    "format",
+                    "source_uri",
+                    "stage",
+                    "created_at",
+                    "updated_at",
+                ],
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "name": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "version": {"type": "string"},
+                    "format": {"type": "string"},
+                    "source_uri": {"type": "string", "format": "uri"},
+                    "checksum_sha256": {"type": "string", "nullable": True},
+                    "size_bytes": {"type": "integer", "format": "int64", "nullable": True},
+                    "stage": {"$ref": "#/components/schemas/ModelStage"},
+                    "last_synced_at": {"type": "string", "format": "date-time", "nullable": True},
+                    "created_at": {"type": "string", "format": "date-time"},
+                    "updated_at": {"type": "string", "format": "date-time"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "nullable": True,
+                    },
+                    "error_message": {"type": "string", "nullable": True},
+                },
+                "example": model_record_example(),
+            },
+            "ModelJob": {
+                "type": "object",
+                "required": ["id", "model_id", "stage", "progress", "started_at"],
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "model_id": {"type": "string", "format": "uuid"},
+                    "stage": {"$ref": "#/components/schemas/ModelStage"},
+                    "progress": {
+                        "type": "number",
+                        "format": "float",
+                        "description": "Download progress between 0 and 1.",
+                    },
+                    "started_at": {"type": "string", "format": "date-time"},
+                    "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+                    "error_message": {"type": "string", "nullable": True},
+                },
+                "example": model_job_example(),
+            },
+            "AuditEvent": {
+                "type": "object",
+                "required": ["id", "event_type", "recorded_at", "payload"],
+                "properties": {
+                    "id": {"type": "string", "format": "uuid"},
+                    "namespace": {"type": "string", "nullable": True},
+                    "actor": {"type": "string", "nullable": True},
+                    "event_type": {"type": "string"},
+                    "recorded_at": {"type": "string", "format": "date-time"},
+                    "payload": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "description": "Event-specific metadata blob.",
+                    },
+                    "signature_valid": {"type": "boolean", "nullable": True},
+                },
+                "example": audit_event_example(),
             },
             "RotateKeyRequest": {
                 "type": "object",
@@ -858,6 +1023,228 @@ def build_spec() -> Dict[str, Any]:
                 },
             }
         },
+        "/api/v1/models": {
+            "get": {
+                "tags": ["Models"],
+                "summary": "List registered models",
+                "operationId": "listModels",
+                "security": [{"bearerAuth": []}],
+                "responses": {
+                    "200": {
+                        "description": "Registered models",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/components/schemas/ModelRecord"},
+                                },
+                                "example": [model_record_example()],
+                            }
+                        },
+                    },
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "500": responses["500"],
+                },
+            },
+            "post": {
+                "tags": ["Models"],
+                "summary": "Register a model",
+                "operationId": "registerModel",
+                "security": [{"bearerAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/RegisterModelRequest"},
+                            "example": components["schemas"]["RegisterModelRequest"]["example"],
+                        }
+                    },
+                },
+                "responses": {
+                    "201": {
+                        "description": "Model registered",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelRecord"},
+                                "example": model_record_example(),
+                            }
+                        },
+                    },
+                    "400": responses["400"],
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "409": {
+                        "description": "Model already exists",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ErrorResponse"},
+                                "example": error_example("model 'phi-3' version '1.0.0' already exists"),
+                            }
+                        },
+                    },
+                    "500": responses["500"],
+                },
+            },
+        },
+        "/api/v1/models/{id}/refresh": {
+            "post": {
+                "tags": ["Models"],
+                "summary": "Queue model refresh",
+                "operationId": "refreshModel",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "format": "uuid"},
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Model refresh queued",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/ModelRecord"},
+                                "example": {**model_record_example(), "stage": "queued"},
+                            }
+                        },
+                    },
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "404": responses["404"],
+                    "500": responses["500"],
+                },
+            }
+        },
+        "/api/v1/models/{id}": {
+            "delete": {
+                "tags": ["Models"],
+                "summary": "Delete a model",
+                "operationId": "deleteModel",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "format": "uuid"},
+                    }
+                ],
+                "responses": {
+                    "204": {"description": "Model deleted"},
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "404": responses["404"],
+                    "500": responses["500"],
+                },
+            }
+        },
+        "/api/v1/models/{id}/jobs": {
+            "get": {
+                "tags": ["Models"],
+                "summary": "List model download jobs",
+                "operationId": "listModelJobs",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "format": "uuid"},
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Model jobs",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/components/schemas/ModelJob"},
+                                },
+                                "example": [model_job_example()],
+                            }
+                        },
+                    },
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "404": responses["404"],
+                    "500": responses["500"],
+                },
+            }
+        },
+        "/api/v1/audit/events": {
+            "get": {
+                "tags": ["Audit"],
+                "summary": "List audit events",
+                "operationId": "listAuditEvents",
+                "security": [{"bearerAuth": []}],
+                "parameters": [
+                    {
+                        "name": "namespace",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Filter by namespace identifier.",
+                    },
+                    {
+                        "name": "event_type",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Filter by audit event type.",
+                    },
+                    {
+                        "name": "actor",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": "Filter by actor identifier (e.g. API key ID).",
+                    },
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "integer", "format": "int32", "minimum": 1, "maximum": 500},
+                        "description": "Maximum number of records to return (default 100, max 500).",
+                    },
+                    {
+                        "name": "since",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string", "format": "date-time"},
+                        "description": "Return events recorded at or after this timestamp.",
+                    },
+                    {
+                        "name": "until",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string", "format": "date-time"},
+                        "description": "Return events recorded at or before this timestamp.",
+                    },
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Audit log entries",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/components/schemas/AuditEvent"},
+                                },
+                                "example": [audit_event_example()],
+                            }
+                        },
+                    },
+                    "400": responses["400"],
+                    "401": responses["401"],
+                    "403": responses["403"],
+                    "500": responses["500"],
+                },
+            }
+        },
     }
 
     return {
@@ -877,6 +1264,8 @@ def build_spec() -> Dict[str, Any]:
             {"name": "Operations", "description": "Health and telemetry endpoints."},
             {"name": "Sandboxes", "description": "Sandbox lifecycle management."},
             {"name": "Auth", "description": "API key issuance and revocation."},
+            {"name": "Models", "description": "Model registry and download jobs."},
+            {"name": "Audit", "description": "Audit log access and filtering."},
         ],
         "paths": paths,
         "components": components,

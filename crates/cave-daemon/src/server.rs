@@ -25,6 +25,9 @@ use tracing::{error, info};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use uuid::Uuid;
 
+mod audit;
+mod models;
+
 pub async fn run() -> Result<()> {
     let config = AppConfig::from_env()?;
 
@@ -83,6 +86,14 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/auth/keys/rotate", post(rotate_key))
         .route("/api/v1/auth/keys/rotated", post(verify_rotation_webhook))
         .route("/api/v1/auth/keys/:id", delete(revoke_key))
+        .route(
+            "/api/v1/models",
+            get(models::list_models).post(models::register_model),
+        )
+        .route("/api/v1/models/:id/refresh", post(models::refresh_model))
+        .route("/api/v1/models/:id", delete(models::delete_model))
+        .route("/api/v1/models/:id/jobs", get(models::list_model_jobs))
+        .route("/api/v1/audit/events", get(audit::list_audit_events))
         .with_state(state)
 }
 
@@ -1114,7 +1125,13 @@ pub mod docs {
             list_keys,
             rotate_key,
             verify_rotation_webhook,
-            revoke_key
+            revoke_key,
+            models::list_models,
+            models::register_model,
+            models::refresh_model,
+            models::delete_model,
+            models::list_model_jobs,
+            audit::list_audit_events
         ),
         components(
             schemas(
@@ -1134,7 +1151,12 @@ pub mod docs {
                 RotationWebhookResponse,
                 KeyInfo,
                 KeyScope,
-                RotationWebhookPayload
+                RotationWebhookPayload,
+                models::RegisterModelBody,
+                models::ModelResponse,
+                models::ModelStageDto,
+                models::ModelJobResponse,
+                audit::AuditEventResponse
             ),
             security_schemes(
                 bearerAuth = (
@@ -1444,5 +1466,158 @@ mod tests {
 
         let response = router.call(request).await.expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn models_register_and_refresh_flow() {
+        let (state, mut router, _tmp) = setup_test_app().await;
+        let admin = state
+            .auth
+            .issue_key(KeyScope::Admin, 1000, None)
+            .await
+            .expect("admin key");
+
+        let register_body = json!({
+            "name": "phi-3",
+            "provider": "open-model",
+            "version": "1.0.0",
+            "format": "gguf",
+            "source_uri": "https://example.com/models/phi-3.gguf",
+            "tags": ["text", "demo"],
+        });
+
+        let register_request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/models")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::from(serde_json::to_vec(&register_body).unwrap()))
+            .expect("request");
+
+        let register_response = router
+            .call(register_request)
+            .await
+            .expect("register response");
+        assert_eq!(register_response.status(), StatusCode::CREATED);
+        let register_bytes = to_bytes(register_response.into_body(), usize::MAX)
+            .await
+            .expect("register body");
+        let registered: serde_json::Value = serde_json::from_slice(&register_bytes).unwrap();
+        assert_eq!(registered["name"], "phi-3");
+        assert_eq!(registered["stage"], "registered");
+        let model_id = registered["id"].as_str().unwrap().to_string();
+
+        let list_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/models")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("list request");
+        let list_response = router.call(list_request).await.expect("list response");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_bytes = to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        assert!(list_json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["id"].as_str() == Some(model_id.as_str()) }));
+
+        let refresh_request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/models/{}/refresh", model_id))
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("refresh request");
+        let refresh_response = router
+            .call(refresh_request)
+            .await
+            .expect("refresh response");
+        assert_eq!(refresh_response.status(), StatusCode::OK);
+        let refresh_bytes = to_bytes(refresh_response.into_body(), usize::MAX)
+            .await
+            .expect("refresh body");
+        let refreshed: serde_json::Value = serde_json::from_slice(&refresh_bytes).unwrap();
+        assert_eq!(refreshed["stage"], "queued");
+
+        let jobs_request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/models/{}/jobs", model_id))
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("jobs request");
+        let jobs_response = router.call(jobs_request).await.expect("jobs response");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_bytes = to_bytes(jobs_response.into_body(), usize::MAX)
+            .await
+            .expect("jobs body");
+        let jobs_json: serde_json::Value = serde_json::from_slice(&jobs_bytes).unwrap();
+        let first_job = jobs_json
+            .as_array()
+            .and_then(|entries| entries.first())
+            .expect("job entry");
+        assert_eq!(first_job["stage"], "queued");
+
+        let audit_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/audit/events?limit=10")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("audit request");
+        let audit_response = router.call(audit_request).await.expect("audit response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let audit_bytes = to_bytes(audit_response.into_body(), usize::MAX)
+            .await
+            .expect("audit body");
+        let events: serde_json::Value = serde_json::from_slice(&audit_bytes).unwrap();
+        assert!(events
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["event_type"] == "model.registered"));
+    }
+
+    #[tokio::test]
+    async fn models_endpoints_require_admin_scope() {
+        let (_state, mut router, _tmp) = setup_test_app().await;
+
+        let response = router
+            .call(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/models")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn audit_requires_admin_scope() {
+        let (state, mut router, _tmp) = setup_test_app().await;
+        let namespace_key = state
+            .auth
+            .issue_key(
+                KeyScope::Namespace {
+                    namespace: "team-alpha".into(),
+                },
+                100,
+                None,
+            )
+            .await
+            .expect("namespace key");
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/audit/events")
+            .header("authorization", format!("Bearer {}", namespace_key.token))
+            .body(Body::empty())
+            .expect("request");
+        let response = router.call(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
