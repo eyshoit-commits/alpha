@@ -14,8 +14,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-sha2.workspace = true
 base64.workspace = true
+rand.workspace = true
+aes-gcm.workspace = true
+pbkdf2.workspace = true
+sha2.workspace = true
 
 # NEO blockchain support
 neo3-rs = "0.1"

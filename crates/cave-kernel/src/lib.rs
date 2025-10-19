@@ -1164,6 +1164,20 @@ fn sanitize_component(input: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn build_seccomp_allowlist_deduplicates_entries() {
+        let mut settings = IsolationSettings::default();
+        settings.seccomp_allow_syscalls =
+            vec!["open".to_string(), "bpf".to_string(), "open".to_string()];
+
+        let allowlist = build_seccomp_allowlist(&settings);
+        let open_count = allowlist.iter().filter(|name| *name == "open").count();
+
+        assert_eq!(open_count, 1, "expected custom syscall deduplication");
+        assert!(allowlist.contains(&"bpf".to_string()));
+        assert!(allowlist.iter().all(|name| !name.is_empty()));
+    }
+
     #[tokio::test]
     async fn create_start_exec_stop_flow() {
         let db = Database::connect("sqlite::memory:").await.unwrap();

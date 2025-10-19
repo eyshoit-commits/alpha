@@ -41,6 +41,8 @@ sqlparser = "0.37"
 jsonwebtoken = "9"
 base64 = "0.21"
 hmac = "0.12"
+aes-gcm = { version = "0.10", features = ["aes256"] }
+pbkdf2 = "0.12"
 utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
 opentelemetry = { version = "0.21", features = ["trace", "metrics"] }
 opentelemetry_sdk = { version = "0.21", features = ["rt-tokio", "trace", "metrics"] }
