@@ -184,9 +184,22 @@ impl AuditLogState {
     fn open_file(path: &Path) -> Result<File> {
         OpenOptions::new()
             .create(true)
+            .write(true)
             .append(true)
             .open(path)
             .with_context(|| format!("opening audit log {}", path.display()))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RotationOutcome {
+    rotated_path: PathBuf,
+    cosign: Option<CosignConfig>,
+}
+
+impl RotationOutcome {
+    fn into_cosign_job(self) -> Option<(CosignConfig, PathBuf)> {
+        self.cosign.map(|cosign| (cosign, self.rotated_path))
     }
 }
 
@@ -234,7 +247,7 @@ impl FileAuditLogWriter {
         })
     }
 
-    fn rotate_locked(state: &mut AuditLogState) -> Result<Option<PathBuf>> {
+    fn rotate_locked(state: &mut AuditLogState) -> Result<Option<RotationOutcome>> {
         if state.current_size == 0 {
             if state.file.is_none() {
                 let file = AuditLogState::open_file(&state.path)?;
@@ -257,24 +270,25 @@ impl FileAuditLogWriter {
         new_file
             .set_len(0)
             .context("resetting audit log after rotation")?;
-        let new_size = new_file.metadata().map(|m| m.len()).unwrap_or(0);
-        state.current_size = new_size;
+        state.current_size = 0;
         state.file = Some(new_file);
 
-        if let Some(cosign) = state.cosign.clone() {
-            cosign.sign(&rotated_path)?;
-        }
-
-        Ok(Some(rotated_path))
+        Ok(Some(RotationOutcome {
+            rotated_path,
+            cosign: state.cosign.clone(),
+        }))
     }
 }
 
 impl AuditLogWriter for FileAuditLogWriter {
     fn append(&self, record: &AuditRecord) -> Result<()> {
-        let mut guard = self.state.lock();
         let envelope = AuditEnvelope::from_record(record);
         let canonical = serde_json::to_vec(&envelope).context("serializing audit envelope")?;
-        let signature = match guard.hmac_key.as_deref() {
+        let hmac_key = {
+            let guard = self.state.lock();
+            guard.hmac_key.clone()
+        };
+        let signature = match hmac_key.as_deref() {
             Some(key) => {
                 let mut mac =
                     HmacSha256::new_from_slice(key).context("initializing audit log HMAC")?;
@@ -292,27 +306,47 @@ impl AuditLogWriter for FileAuditLogWriter {
 
         let encoded = serde_json::to_vec(&line).context("encoding audit log line")?;
         let entry_size = (encoded.len() + 1) as u64;
+        let cosign_job = {
+            let mut guard = self.state.lock();
 
-        if guard.current_size + entry_size > guard.max_bytes {
-            FileAuditLogWriter::rotate_locked(&mut guard)?;
+            let rotation = if guard.current_size + entry_size > guard.max_bytes {
+                FileAuditLogWriter::rotate_locked(&mut guard)?
+            } else {
+                None
+            };
+
+            let file = guard
+                .file
+                .as_mut()
+                .ok_or_else(|| anyhow!("audit log file handle missing"))?;
+            file.write_all(&encoded).context("writing audit log line")?;
+            file.write_all(b"\n").context("writing audit log newline")?;
+            file.flush().context("flushing audit log")?;
+            file.sync_data().context("syncing audit log to disk")?;
+
+            guard.current_size += entry_size;
+
+            Ok(rotation.and_then(|outcome| outcome.into_cosign_job()))
+        }?;
+
+        if let Some((cosign, rotated_path)) = cosign_job {
+            cosign.sign(&rotated_path)?;
         }
 
-        let file = guard
-            .file
-            .as_mut()
-            .ok_or_else(|| anyhow!("audit log file handle missing"))?;
-        file.write_all(&encoded).context("writing audit log line")?;
-        file.write_all(b"\n").context("writing audit log newline")?;
-        file.flush().context("flushing audit log")?;
-        file.sync_data().context("syncing audit log to disk")?;
-
-        guard.current_size += entry_size;
         Ok(())
     }
 
     fn rotate(&self) -> Result<()> {
-        let mut guard = self.state.lock();
-        FileAuditLogWriter::rotate_locked(&mut guard)?;
+        let cosign_job = {
+            let mut guard = self.state.lock();
+            FileAuditLogWriter::rotate_locked(&mut guard)?
+                .and_then(|outcome| outcome.into_cosign_job())
+        };
+
+        if let Some((cosign, rotated_path)) = cosign_job {
+            cosign.sign(&rotated_path)?;
+        }
+
         Ok(())
     }
 }
