@@ -1614,6 +1614,27 @@ mod tests {
         }
         assert!(seen_registered);
         assert!(seen_deleted);
+
+        let admin_id = admin.info.id.to_string();
+        let audit_actor_request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/audit/events?actor={}", admin_id))
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("audit actor request");
+        let audit_actor_response = router
+            .call(audit_actor_request)
+            .await
+            .expect("audit actor response");
+        assert_eq!(audit_actor_response.status(), StatusCode::OK);
+        let audit_actor_bytes = to_bytes(audit_actor_response.into_body(), usize::MAX)
+            .await
+            .expect("audit actor body");
+        let actor_events: serde_json::Value = serde_json::from_slice(&audit_actor_bytes).unwrap();
+        assert!(!actor_events.as_array().unwrap().is_empty());
+        for event in actor_events.as_array().unwrap() {
+            assert_eq!(event["actor"].as_str(), Some(admin_id.as_str()));
+        }
     }
 
     #[tokio::test]

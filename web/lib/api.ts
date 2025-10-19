@@ -158,6 +158,7 @@ export interface AuditEvent {
 export interface ListAuditEventsParams {
   namespace?: string;
   eventType?: string;
+  actor?: string;
   limit?: number;
   since?: string;
   until?: string;
@@ -315,6 +316,9 @@ export class ApiClient {
     }
     if (params.eventType) {
       search.set("event_type", params.eventType);
+    }
+    if (params.actor) {
+      search.set("actor", params.actor);
     }
     if (typeof params.limit === "number") {
       search.set("limit", String(params.limit));
