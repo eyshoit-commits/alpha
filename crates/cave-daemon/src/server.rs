@@ -1560,6 +1560,37 @@ mod tests {
             .expect("job entry");
         assert_eq!(first_job["stage"], "queued");
 
+        let delete_request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/models/{}", model_id))
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("delete request");
+        let delete_response = router.call(delete_request).await.expect("delete response");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let list_after_delete_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/models")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("list after delete request");
+        let list_after_delete_response = router
+            .call(list_after_delete_request)
+            .await
+            .expect("list after delete response");
+        assert_eq!(list_after_delete_response.status(), StatusCode::OK);
+        let list_after_delete_bytes = to_bytes(list_after_delete_response.into_body(), usize::MAX)
+            .await
+            .expect("list after delete body");
+        let list_after_delete: serde_json::Value =
+            serde_json::from_slice(&list_after_delete_bytes).unwrap();
+        assert!(list_after_delete
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["id"].as_str() != Some(model_id.as_str())));
+
         let audit_request = Request::builder()
             .method("GET")
             .uri("/api/v1/audit/events?limit=10")
@@ -1572,11 +1603,17 @@ mod tests {
             .await
             .expect("audit body");
         let events: serde_json::Value = serde_json::from_slice(&audit_bytes).unwrap();
-        assert!(events
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["event_type"] == "model.registered"));
+        let mut seen_registered = false;
+        let mut seen_deleted = false;
+        for event in events.as_array().unwrap() {
+            match event["event_type"].as_str() {
+                Some("model.registered") => seen_registered = true,
+                Some("model.deleted") => seen_deleted = true,
+                _ => {}
+            }
+        }
+        assert!(seen_registered);
+        assert!(seen_deleted);
     }
 
     #[tokio::test]
