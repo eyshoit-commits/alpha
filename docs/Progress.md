@@ -59,7 +59,7 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
 - [x] Telemetrie-Policy einführen: `CAVE_OTEL_SAMPLING_RATE` pro Umgebung abstimmen und monitoren.
   Status: `telemetry::init` initialisiert OTLP-Export mit Sampling & Graceful-Fallback (`crates/cave-daemon/src/telemetry.rs`), Dokumentation in `docs/telemetry.md` ergänzt.
 - [x] Audit-Log Format (signierte JSON-Lines) implementieren und überprüfen.
-  Status: `AuditLogWriter` schreibt HMAC-signierte JSONL, rotiert mit Cosign-Signatur und lässt den Signaturlauf nun außerhalb des Mutex-Kontexts stattfinden (`crates/bkg-db/src/audit.rs:240-351`). Ein neuer Verifizierer prüft HMAC-Signaturen und deckt Manipulationen in Tests auf (`crates/bkg-db/src/audit.rs:385-456`).
+  Status: `AuditLogWriter` schreibt HMAC-signierte JSONL, rotiert mit Cosign-Signatur und lässt den Signaturlauf nun außerhalb des Mutex-Kontexts stattfinden (`crates/bkg-db/src/audit.rs:360-457`). Der Verifizierer kann einzelne Zeilen oder komplette Dateien samt HMAC prüfen und bricht bei fehlenden Schlüsseln sauber ab (`crates/bkg-db/src/audit.rs:41-126, 590-707`).
 - [ ] Seccomp Profile und erweiterte Namespace-Isolation integrieren, um Bubblewrap-Fallback vollständig zu ersetzen.  
   Status: Der Prozess-Runtime setzt OverlayFS + Seccomp-Allowlist ohne Bubblewrap um (`crates/cave-kernel/src/lib.rs:660-1043`); fertige Bubblewrap-Profile zur Namespace-Härtung müssen noch ergänzt werden.
 - [x] Sandbox-Defaultlimits final abnehmen (README & `config/sandbox_config.toml` jetzt auf 2 vCPU / 1 GiB / 120 s / 1 GiB Disk, Overrides erlaubt).  

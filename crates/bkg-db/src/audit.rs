@@ -4,7 +4,7 @@ use std::{
     ffi::OsStr,
     fmt,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -36,6 +36,93 @@ pub struct AuditRecord {
 pub trait AuditLogWriter: Send + Sync + fmt::Debug {
     fn append(&self, record: &AuditRecord) -> Result<()>;
     fn rotate(&self) -> Result<()>;
+}
+
+/// Utility for parsing and verifying persisted audit log entries.
+#[derive(Debug, Clone, Default)]
+pub struct AuditLogVerifier {
+    key: Option<Vec<u8>>,
+}
+
+impl AuditLogVerifier {
+    /// Creates a verifier that optionally checks HMAC signatures.
+    pub fn new(key: Option<Vec<u8>>) -> Self {
+        Self { key }
+    }
+
+    /// Returns a verifier that enforces HMAC signatures with the provided key.
+    pub fn with_key(key: Vec<u8>) -> Self {
+        Self { key: Some(key) }
+    }
+
+    /// Parses and verifies a single JSONL entry.
+    pub fn verify_line(&self, line: &str) -> Result<VerifiedAuditLine> {
+        let parsed: AuditLogLine =
+            serde_json::from_str(line).context("parsing audit log line from JSON")?;
+        self.verify_parsed_line(parsed)
+    }
+
+    /// Parses and verifies each line from the provided reader, returning the
+    /// validated envelopes.
+    pub fn verify_reader<R: BufRead>(&self, reader: R) -> Result<Vec<VerifiedAuditLine>> {
+        reader
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                let raw = line.with_context(|| format!("reading audit log line {}", index + 1))?;
+                self.verify_line(&raw)
+                    .with_context(|| format!("validating audit log line {}", index + 1))
+            })
+            .collect()
+    }
+
+    /// Opens a file from disk, streaming and validating each entry.
+    pub fn verify_file<P: AsRef<Path>>(&self, path: P) -> Result<Vec<VerifiedAuditLine>> {
+        let file = File::open(path.as_ref())
+            .with_context(|| format!("opening audit log {}", path.as_ref().display()))?;
+        let reader = BufReader::new(file);
+        self.verify_reader(reader)
+    }
+
+    fn verify_parsed_line(&self, line: AuditLogLine) -> Result<VerifiedAuditLine> {
+        match (self.key.as_deref(), line.hmac.as_ref()) {
+            (Some(key), _) => line.verify_hmac(key).context("verifying audit log HMAC")?,
+            (None, Some(_)) => {
+                return Err(anyhow!(
+                    "audit log line carries an HMAC signature but the verifier has no key"
+                ))
+            }
+            (None, None) => {}
+        }
+
+        Ok(VerifiedAuditLine::from(line))
+    }
+}
+
+/// Materialised audit log entry returned by [`AuditLogVerifier`].
+#[derive(Debug, Clone)]
+pub struct VerifiedAuditLine {
+    pub version: String,
+    pub event_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub entity: String,
+    pub action: String,
+    pub payload: Value,
+    pub hmac: Option<String>,
+}
+
+impl From<AuditLogLine> for VerifiedAuditLine {
+    fn from(line: AuditLogLine) -> Self {
+        Self {
+            version: line.envelope.version.to_string(),
+            event_id: line.envelope.event_id,
+            timestamp: line.envelope.timestamp,
+            entity: line.envelope.entity,
+            action: line.envelope.action,
+            payload: line.envelope.payload,
+            hmac: line.hmac,
+        }
+    }
 }
 
 /// High-level pipeline wrapper that daemon/kernel components can clone and use.
@@ -521,13 +608,15 @@ mod tests {
         writer.append(&record).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        let line: AuditLogLine = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
-        assert_eq!(line.envelope.version, AUDIT_LOG_VERSION);
-        assert_eq!(line.envelope.entity, "api_keys");
-        assert_eq!(line.envelope.action, "insert");
-        assert!(Uuid::parse_str(&line.envelope.event_id).is_ok());
-        DateTime::parse_from_rfc3339(&line.envelope.timestamp.to_rfc3339()).unwrap();
-        line.verify_hmac(b"super-secret").unwrap();
+        let raw = contents.lines().next().unwrap();
+        let verifier = AuditLogVerifier::with_key(b"super-secret".to_vec());
+        let verified = verifier.verify_line(raw).unwrap();
+
+        assert_eq!(verified.version, AUDIT_LOG_VERSION);
+        assert_eq!(verified.entity, "api_keys");
+        assert_eq!(verified.action, "insert");
+        assert!(Uuid::parse_str(&verified.event_id).is_ok());
+        DateTime::parse_from_rfc3339(&verified.timestamp.to_rfc3339()).unwrap();
     }
 
     #[test]
@@ -552,6 +641,69 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         let line: AuditLogLine = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
         assert!(line.hmac.is_none());
+    }
+
+    #[test]
+    fn verifier_requires_key_for_signed_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let config = FileAuditLogConfig {
+            path: path.clone(),
+            max_bytes: 4096,
+            hmac_key: Some(b"secret".to_vec()),
+            cosign: None,
+        };
+        let writer = FileAuditLogWriter::new(config).unwrap();
+
+        let record = AuditRecord {
+            entity: "api_keys".into(),
+            action: "insert".into(),
+            payload: json!({"id": 1}),
+        };
+
+        writer.append(&record).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let raw = contents.lines().next().unwrap();
+        let verifier = AuditLogVerifier::new(None);
+        let error = verifier.verify_line(raw).unwrap_err();
+        assert!(error.to_string().contains("verifier has no key"));
+    }
+
+    #[test]
+    fn verifier_streams_file_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let config = FileAuditLogConfig {
+            path: path.clone(),
+            max_bytes: 4096,
+            hmac_key: None,
+            cosign: None,
+        };
+        let writer = FileAuditLogWriter::new(config).unwrap();
+
+        let record_a = AuditRecord {
+            entity: "sandboxes".into(),
+            action: "create".into(),
+            payload: json!({"namespace": "alpha"}),
+        };
+        let record_b = AuditRecord {
+            entity: "sandboxes".into(),
+            action: "start".into(),
+            payload: json!({"namespace": "alpha"}),
+        };
+
+        writer.append(&record_a).unwrap();
+        writer.append(&record_b).unwrap();
+
+        let verifier = AuditLogVerifier::new(None);
+        let entries = verifier.verify_file(&path).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entity, "sandboxes");
+        assert_eq!(entries[0].action, "create");
+        assert_eq!(entries[1].action, "start");
+        assert!(entries.iter().all(|entry| entry.hmac.is_none()));
     }
 
     #[test]
@@ -711,12 +863,15 @@ fi
         writer.append(&record).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        let line: AuditLogLine = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
-        line.verify_hmac(b"tamper-secret").unwrap();
+        let raw = contents.lines().next().unwrap();
+        let verifier = AuditLogVerifier::with_key(b"tamper-secret".to_vec());
+        verifier.verify_line(raw).unwrap();
 
-        let mut tampered = line.clone();
-        tampered.envelope.payload = json!({"id": 2});
-        let error = tampered.verify_hmac(b"tamper-secret").unwrap_err();
-        assert!(error.to_string().contains("verification failed"));
+        let mut tampered_value: Value = serde_json::from_str(raw).unwrap();
+        tampered_value["payload"] = json!({"id": 2});
+        let tampered_raw = serde_json::to_string(&tampered_value).unwrap();
+
+        let error = verifier.verify_line(&tampered_raw).unwrap_err();
+        assert!(error.to_string().contains("verifying audit log HMAC"));
     }
 }
