@@ -86,6 +86,33 @@ impl EmbeddedRestApi {
             "updated_at": record.updated_at.to_rfc3339(),
         })
     }
+
+    async fn record_api_key_usage(&self, subject: &str, timestamp: DateTime<Utc>) -> Result<()> {
+        let key_id = match Uuid::parse_str(subject) {
+            Ok(id) => id,
+            Err(err) => return Err(anyhow!("claims.subject must be a UUID: {err}")),
+        };
+
+        let Some(record) = self.database.fetch_api_key(key_id).await? else {
+            return Err(anyhow!("api key {key_id} not found"));
+        };
+
+        if record.revoked {
+            return Err(anyhow!("api key {key_id} is revoked"));
+        }
+        if let Some(expiration) = record.expires_at {
+            if expiration <= timestamp {
+                return Err(anyhow!(
+                    "api key {key_id} expired at {}",
+                    expiration.to_rfc3339()
+                ));
+            }
+        }
+
+        self.database.touch_api_key_usage(key_id, timestamp).await?;
+
+        Ok(())
+    }
 }
 
 fn plan_table_name(plan: &LogicalPlan) -> Result<&str> {
@@ -125,6 +152,14 @@ fn parse_claims(body: &Value) -> Result<TokenClaims> {
     let issued_at = parse_timestamp(claims_obj.get("issued_at"), "claims.issued_at")?
         .unwrap_or_else(|| Utc::now());
     let expires_at = parse_timestamp(claims_obj.get("expires_at"), "claims.expires_at")?;
+
+    if let Some(exp) = expires_at {
+        if exp <= issued_at {
+            return Err(anyhow!(
+                "'claims.expires_at' must be later than 'claims.issued_at'"
+            ));
+        }
+    }
 
     Ok(TokenClaims {
         subject: subject.to_string(),
@@ -180,13 +215,8 @@ impl RestApiServer for EmbeddedRestApi {
                 let claims = parse_claims(&body)?;
                 let token = self.auth.issue(&claims)?;
 
-                if let Ok(key_id) = Uuid::parse_str(&claims.subject) {
-                    if self.database.fetch_api_key(key_id).await?.is_some() {
-                        self.database
-                            .touch_api_key_usage(key_id, claims.issued_at)
-                            .await?;
-                    }
-                }
+                self.record_api_key_usage(&claims.subject, claims.issued_at)
+                    .await?;
 
                 Ok(json!({
                     "token": token,
@@ -199,6 +229,8 @@ impl RestApiServer for EmbeddedRestApi {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("'token' field is required"))?;
                 let claims = self.auth.verify(token)?;
+                self.record_api_key_usage(&claims.subject, Utc::now())
+                    .await?;
                 Ok(json!({
                     "claims": claims_to_json(&claims),
                 }))
@@ -451,8 +483,8 @@ mod tests {
         );
         assert_eq!(issued_claims["scope"].as_str().unwrap(), "admin");
 
-        let stored = database.fetch_api_key(record.id).await.unwrap().unwrap();
-        assert_eq!(stored.last_used_at, Some(issued_at));
+        let stored_after_issue = database.fetch_api_key(record.id).await.unwrap().unwrap();
+        assert_eq!(stored_after_issue.last_used_at, Some(issued_at));
 
         let verify_response = api
             .handle_auth(json!({
@@ -473,6 +505,11 @@ mod tests {
             verified["expires_at"].as_str().unwrap(),
             issued_claims["expires_at"].as_str().unwrap()
         );
+
+        let stored_after_verify = database.fetch_api_key(record.id).await.unwrap().unwrap();
+        let last_used = stored_after_verify.last_used_at.unwrap();
+        assert!(last_used >= issued_at);
+        assert!(last_used >= stored_after_issue.last_used_at.unwrap());
     }
 
     #[tokio::test]
@@ -508,6 +545,36 @@ mod tests {
             .unwrap_err();
         assert!(invalid_token.to_string().contains("invalid jwt"));
 
+        let invalid_subject = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": "not-a-uuid",
+                    "scope": "admin"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(invalid_subject
+            .to_string()
+            .contains("claims.subject must be a UUID"));
+
+        let invalid_expiry = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": Uuid::new_v4().to_string(),
+                    "scope": "admin",
+                    "issued_at": Utc::now().to_rfc3339(),
+                    "expires_at": (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339()
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(invalid_expiry
+            .to_string()
+            .contains("'claims.expires_at' must be later"));
+
         let unsupported = api
             .handle_auth(json!({
                 "action": "unknown"
@@ -515,6 +582,143 @@ mod tests {
             .await
             .unwrap_err();
         assert!(unsupported.to_string().contains("unsupported auth action"));
+    }
+
+    #[tokio::test]
+    async fn rest_api_issue_rejects_missing_or_revoked_keys() {
+        use crate::ApiKeyScope;
+
+        let (api, database) = setup_rest_api().await;
+        let unknown_id = Uuid::new_v4();
+
+        let missing_key = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": unknown_id.to_string(),
+                    "scope": "admin"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(missing_key.to_string().contains("api key"));
+
+        let record = database
+            .insert_api_key(
+                "hash-456",
+                "hash-456-prefix",
+                ApiKeyScope::Admin,
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        database.revoke_api_key(record.id).await.unwrap();
+
+        let revoked_key = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": record.id.to_string(),
+                    "scope": "admin"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(revoked_key.to_string().contains("revoked"));
+    }
+
+    #[tokio::test]
+    async fn rest_api_issue_rejects_expired_keys() {
+        use crate::ApiKeyScope;
+
+        let (api, database) = setup_rest_api().await;
+        let expired_at = Utc::now() - chrono::Duration::hours(1);
+        let record = database
+            .insert_api_key(
+                "hash-expired",
+                "hash-exp-prefix",
+                ApiKeyScope::Admin,
+                60,
+                Some(expired_at),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let err = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": record.id.to_string(),
+                    "scope": "admin"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn rest_api_verify_rejects_invalid_keys() {
+        use crate::ApiKeyScope;
+
+        let (api, database) = setup_rest_api().await;
+        let auth = JwtHmacAuth::new("secret-key");
+
+        let bogus_claims = TokenClaims {
+            subject: Uuid::new_v4().to_string(),
+            scope: "admin".into(),
+            issued_at: Utc::now(),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        };
+        let bogus_token = auth.issue(&bogus_claims).unwrap();
+        let missing_key = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": bogus_token
+            }))
+            .await
+            .unwrap_err();
+        assert!(missing_key.to_string().contains("api key"));
+
+        let record = database
+            .insert_api_key(
+                "hash-valid",
+                "hash-val-prefix",
+                ApiKeyScope::Admin,
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let issue_response = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": record.id.to_string(),
+                    "scope": "admin"
+                }
+            }))
+            .await
+            .unwrap();
+        let token = issue_response["token"].as_str().unwrap();
+
+        database.revoke_api_key(record.id).await.unwrap();
+
+        let revoked_err = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": token
+            }))
+            .await
+            .unwrap_err();
+        assert!(revoked_err.to_string().contains("revoked"));
     }
 
     #[test]
