@@ -201,13 +201,20 @@ fn validate_claim_scope(expected: &ApiKeyScope, provided: &str) -> Result<()> {
             }
         }
         ApiKeyScope::Namespace { namespace } => {
-            let Some(claim_namespace) = provided.strip_prefix("namespace:") else {
+            if !provided.starts_with("namespace:") {
                 return Err(anyhow!(
                     "claims.scope '{provided}' must be 'namespace:<name>' for namespace keys"
                 ));
-            };
+            }
 
-            if claim_namespace == namespace {
+            if provided == namespace {
+                return Ok(());
+            }
+
+            let provided_namespace = provided.strip_prefix("namespace:").unwrap_or(provided);
+            let expected_namespace = namespace.strip_prefix("namespace:").unwrap_or(namespace);
+
+            if provided_namespace == expected_namespace {
                 Ok(())
             } else {
                 Err(anyhow!(
@@ -738,6 +745,108 @@ mod tests {
         assert!(wrong_namespace_err
             .to_string()
             .contains("does not match namespace"));
+    }
+
+    #[tokio::test]
+    async fn rest_api_issue_and_verify_namespace_scope() {
+        use crate::ApiKeyScope;
+
+        let (api, database, _) = setup_rest_api().await;
+
+        let prefixed_record = database
+            .insert_api_key(
+                "hash-prefixed",
+                "hash-prefixed-prefix",
+                ApiKeyScope::Namespace {
+                    namespace: "namespace:gamma".into(),
+                },
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let prefixed_issue = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": prefixed_record.id.to_string(),
+                    "scope": "namespace:gamma"
+                }
+            }))
+            .await
+            .unwrap();
+
+        let prefixed_token = prefixed_issue["token"].as_str().unwrap();
+        let prefixed_claims = prefixed_issue["claims"].as_object().unwrap();
+        assert_eq!(
+            prefixed_claims["scope"].as_str().unwrap(),
+            "namespace:gamma"
+        );
+
+        let prefixed_record_after_issue = database
+            .fetch_api_key(prefixed_record.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(prefixed_record_after_issue.last_used_at.is_some());
+
+        let prefixed_verify = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": prefixed_token
+            }))
+            .await
+            .unwrap();
+
+        let prefixed_verified = prefixed_verify["claims"].as_object().unwrap();
+        assert_eq!(
+            prefixed_verified["scope"].as_str().unwrap(),
+            "namespace:gamma"
+        );
+
+        let plain_record = database
+            .insert_api_key(
+                "hash-plain",
+                "hash-plain-prefix",
+                ApiKeyScope::Namespace {
+                    namespace: "delta".into(),
+                },
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let plain_issue = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": plain_record.id.to_string(),
+                    "scope": "namespace:delta"
+                }
+            }))
+            .await
+            .unwrap();
+
+        let plain_token = plain_issue["token"].as_str().unwrap();
+        let plain_claims = plain_issue["claims"].as_object().unwrap();
+        assert_eq!(plain_claims["scope"].as_str().unwrap(), "namespace:delta");
+
+        let plain_verify = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": plain_token
+            }))
+            .await
+            .unwrap();
+
+        let plain_verified = plain_verify["claims"].as_object().unwrap();
+        assert_eq!(plain_verified["scope"].as_str().unwrap(), "namespace:delta");
     }
 
     #[tokio::test]
