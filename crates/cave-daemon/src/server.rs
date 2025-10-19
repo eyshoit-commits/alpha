@@ -196,6 +196,65 @@ impl AppConfig {
             }
         }
 
+        if let Some(unshare) = parse_string_list_env("CAVE_BWRAP_UNSHARE") {
+            if !unshare.is_empty() {
+                isolation.bubblewrap_unshare = unshare;
+            }
+        }
+
+        if let Some(drop_caps) = parse_string_list_env("CAVE_BWRAP_DROP_CAPS") {
+            if !drop_caps.is_empty() {
+                isolation.bubblewrap_drop_capabilities = drop_caps;
+            }
+        }
+
+        if let Some(paths) = parse_path_list_env("CAVE_BWRAP_RO_PATHS") {
+            if !paths.is_empty() {
+                isolation.bubblewrap_readonly_paths = paths;
+            }
+        }
+
+        if let Some(paths) = parse_path_list_env("CAVE_BWRAP_DEV_PATHS") {
+            if !paths.is_empty() {
+                isolation.bubblewrap_dev_paths = paths;
+            }
+        }
+
+        if let Some(paths) = parse_path_list_env("CAVE_BWRAP_TMPFS_PATHS") {
+            if !paths.is_empty() {
+                isolation.bubblewrap_tmpfs_paths = paths;
+            }
+        }
+
+        match env::var("CAVE_BWRAP_UID") {
+            Ok(value) if value.trim().is_empty() => isolation.bubblewrap_uid = None,
+            Ok(value) => {
+                if let Ok(uid) = value.trim().parse::<u32>() {
+                    isolation.bubblewrap_uid = Some(uid);
+                }
+            }
+            Err(_) => {}
+        }
+
+        match env::var("CAVE_BWRAP_GID") {
+            Ok(value) if value.trim().is_empty() => isolation.bubblewrap_gid = None,
+            Ok(value) => {
+                if let Ok(gid) = value.trim().parse::<u32>() {
+                    isolation.bubblewrap_gid = Some(gid);
+                }
+            }
+            Err(_) => {}
+        }
+
+        if let Ok(path) = env::var("CAVE_BWRAP_PROC_PATH") {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                isolation.bubblewrap_proc_path = None;
+            } else {
+                isolation.bubblewrap_proc_path = Some(PathBuf::from(trimmed));
+            }
+        }
+
         if let Ok(path) = env::var("CAVE_CGROUP_ROOT") {
             if !path.is_empty() {
                 isolation.cgroup_root = Some(PathBuf::from(path));
@@ -1788,6 +1847,26 @@ fn bool_env(key: &str) -> Option<bool> {
             "0" | "false" | "no" | "off" => Some(false),
             _ => None,
         })
+}
+
+fn parse_string_list_env(key: &str) -> Option<Vec<String>> {
+    env::var(key).ok().map(|value| {
+        value
+            .split(',')
+            .filter_map(|item| {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn parse_path_list_env(key: &str) -> Option<Vec<PathBuf>> {
+    parse_string_list_env(key).map(|items| items.into_iter().map(PathBuf::from).collect())
 }
 
 #[cfg(test)]

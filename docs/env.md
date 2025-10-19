@@ -47,6 +47,13 @@ WICHTIG: Variablen, die als sensibel markiert sind, dürfen niemals in CI-Logs o
 - `CAVE_DISABLE_CGROUPS` / `CAVE_ENABLE_CGROUPS` – Erzwingt oder verbietet cgroups.
 - `CAVE_ISOLATION_NO_FALLBACK` – Verhindert Start, wenn Bubblewrap fehlt.
 - `CAVE_BWRAP_PATH` – Absoluter Pfad zur `bubblewrap`-Binary.
+- `CAVE_BWRAP_UNSHARE` – Kommagetrennte Liste der zu isolierenden Namespaces (`user,pid,ipc,uts,net,cgroup`).
+- `CAVE_BWRAP_DROP_CAPS` – Kommagetrennte Linux-Capabilities, die per `--cap-drop` entfernt werden.
+- `CAVE_BWRAP_RO_PATHS` – Kommagetrennte Liste von Host-Pfaden, die read-only eingebunden werden.
+- `CAVE_BWRAP_DEV_PATHS` – Kommagetrennte Liste von Pfaden, die als `--dev-bind` verfügbar sein sollen.
+- `CAVE_BWRAP_TMPFS_PATHS` – Kommagetrennte Liste von Pfaden, die als `tmpfs` bereitgestellt werden.
+- `CAVE_BWRAP_UID` / `CAVE_BWRAP_GID` – UID/GID, unter denen Prozesse im Bubblewrap-Namespace laufen; leerer String deaktiviert die Setzung.
+- `CAVE_BWRAP_PROC_PATH` – Alternativer Pfad für ein isoliertes `/proc`; leerer String deaktiviert den Mount.
 - `CAVE_CGROUP_ROOT` – cgroup v2 Root (Default `/sys/fs/cgroup/bkg`).
 
 ### Audit & Governance

@@ -12,6 +12,7 @@ mod isolation;
 
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -87,6 +88,14 @@ pub struct IsolationSettings {
     pub seccomp_profile_path: Option<PathBuf>,
     pub seccomp_allow_syscalls: Vec<String>,
     pub fallback_to_plain: bool,
+    pub bubblewrap_unshare: Vec<String>,
+    pub bubblewrap_drop_capabilities: Vec<String>,
+    pub bubblewrap_readonly_paths: Vec<PathBuf>,
+    pub bubblewrap_dev_paths: Vec<PathBuf>,
+    pub bubblewrap_tmpfs_paths: Vec<PathBuf>,
+    pub bubblewrap_uid: Option<u32>,
+    pub bubblewrap_gid: Option<u32>,
+    pub bubblewrap_proc_path: Option<PathBuf>,
 }
 
 impl Default for IsolationSettings {
@@ -101,6 +110,53 @@ impl Default for IsolationSettings {
             seccomp_profile_path: None,
             seccomp_allow_syscalls: Vec::new(),
             fallback_to_plain: true,
+            bubblewrap_unshare: vec![
+                "user".to_string(),
+                "pid".to_string(),
+                "ipc".to_string(),
+                "uts".to_string(),
+                "net".to_string(),
+                "cgroup".to_string(),
+            ],
+            bubblewrap_drop_capabilities: vec![
+                "CAP_AUDIT_CONTROL".to_string(),
+                "CAP_AUDIT_WRITE".to_string(),
+                "CAP_KILL".to_string(),
+                "CAP_MKNOD".to_string(),
+                "CAP_NET_ADMIN".to_string(),
+                "CAP_NET_BIND_SERVICE".to_string(),
+                "CAP_NET_BROADCAST".to_string(),
+                "CAP_NET_RAW".to_string(),
+                "CAP_SYS_ADMIN".to_string(),
+                "CAP_SYS_BOOT".to_string(),
+                "CAP_SYS_MODULE".to_string(),
+                "CAP_SYS_PTRACE".to_string(),
+                "CAP_SYSLOG".to_string(),
+                "CAP_SYS_TIME".to_string(),
+                "CAP_SYS_TTY_CONFIG".to_string(),
+                "CAP_MAC_ADMIN".to_string(),
+                "CAP_SETFCAP".to_string(),
+                "CAP_SETUID".to_string(),
+                "CAP_SETGID".to_string(),
+                "CAP_SETPCAP".to_string(),
+            ],
+            bubblewrap_readonly_paths: vec![
+                PathBuf::from("/usr"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/sbin"),
+                PathBuf::from("/lib"),
+                PathBuf::from("/lib64"),
+                PathBuf::from("/etc"),
+            ],
+            bubblewrap_dev_paths: vec![PathBuf::from("/dev")],
+            bubblewrap_tmpfs_paths: vec![
+                PathBuf::from("/tmp"),
+                PathBuf::from("/run"),
+                PathBuf::from("/var/tmp"),
+            ],
+            bubblewrap_uid: Some(65_534),
+            bubblewrap_gid: Some(65_534),
+            bubblewrap_proc_path: Some(PathBuf::from("/proc")),
         }
     }
 }
@@ -895,6 +951,7 @@ impl SandboxInstance for ProcessSandboxInstance {
                     active_workspace,
                     self.sandbox_id,
                     profile,
+                    &self.runtime.isolation,
                 )
             } else {
                 build_plain_command(
@@ -1105,49 +1162,109 @@ fn build_bubblewrap_command(
     workspace: &Path,
     sandbox_id: Uuid,
     seccomp_profile: Option<&Path>,
+    settings: &IsolationSettings,
 ) -> Command {
     let mut command = Command::new(bwrap_path);
     command.env("BKG_SANDBOX_ID", sandbox_id.to_string());
-    command.arg("--die-with-parent");
-    command.arg("--new-session");
-    command.arg("--unshare-pid");
-    command.arg("--unshare-uts");
-    command.arg("--unshare-ipc");
-    command.arg("--unshare-net");
-    command.arg("--unshare-cgroup");
-    command.arg("--proc").arg("/proc");
-
-    for path in ro_bind_candidates() {
-        if std::path::Path::new(path).exists() {
-            command.arg("--ro-bind").arg(path).arg(path);
-        }
-    }
-
-    command.arg("--dev-bind").arg("/dev").arg("/dev");
-    command.arg("--bind").arg(workspace).arg(workspace);
-    command.arg("--chdir").arg(workspace);
-    command.arg("--tmpfs").arg("/tmp");
-    command
-        .arg("--setenv")
-        .arg("PATH")
-        .arg("/usr/bin:/bin:/sbin");
-    command
-        .arg("--setenv")
-        .arg("BKG_SANDBOX_ID")
-        .arg(sandbox_id.to_string());
-
-    if let Some(profile) = seccomp_profile {
-        command.arg("--seccomp").arg(profile);
-    }
-
-    command.arg("--");
-    command.arg(&request.command);
-    command.args(&request.args);
+    let args = bubblewrap_arguments(request, workspace, sandbox_id, seccomp_profile, settings);
+    command.args(args);
     command
 }
 
-fn ro_bind_candidates() -> &'static [&'static str] {
-    &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
+fn bubblewrap_arguments(
+    request: &ExecRequest,
+    workspace: &Path,
+    sandbox_id: Uuid,
+    seccomp_profile: Option<&Path>,
+    settings: &IsolationSettings,
+) -> Vec<OsString> {
+    let mut args = Vec::new();
+    args.push(OsString::from("--die-with-parent"));
+    args.push(OsString::from("--new-session"));
+
+    for ns in &settings.bubblewrap_unshare {
+        match ns.as_str() {
+            "user" => args.push(OsString::from("--unshare-user")),
+            "pid" => args.push(OsString::from("--unshare-pid")),
+            "ipc" => args.push(OsString::from("--unshare-ipc")),
+            "uts" => args.push(OsString::from("--unshare-uts")),
+            "net" => args.push(OsString::from("--unshare-net")),
+            "cgroup" => args.push(OsString::from("--unshare-cgroup")),
+            other => {
+                warn!(namespace = %other, "ignoring unknown bubblewrap namespace override");
+            }
+        }
+    }
+
+    if let Some(proc_path) = settings.bubblewrap_proc_path.as_ref() {
+        args.push(OsString::from("--proc"));
+        args.push(proc_path.clone().into_os_string());
+    }
+
+    for path in &settings.bubblewrap_readonly_paths {
+        if path.exists() {
+            args.push(OsString::from("--ro-bind"));
+            args.push(path.clone().into_os_string());
+            args.push(path.clone().into_os_string());
+        } else {
+            warn!(path = %path.display(), "skipping missing readonly bind path");
+        }
+    }
+
+    for path in &settings.bubblewrap_dev_paths {
+        if path.exists() {
+            args.push(OsString::from("--dev-bind"));
+            args.push(path.clone().into_os_string());
+            args.push(path.clone().into_os_string());
+        } else {
+            warn!(path = %path.display(), "skipping missing dev bind path");
+        }
+    }
+
+    args.push(OsString::from("--bind"));
+    args.push(workspace.to_path_buf().into_os_string());
+    args.push(workspace.to_path_buf().into_os_string());
+    args.push(OsString::from("--chdir"));
+    args.push(workspace.to_path_buf().into_os_string());
+
+    for tmp in &settings.bubblewrap_tmpfs_paths {
+        args.push(OsString::from("--tmpfs"));
+        args.push(tmp.clone().into_os_string());
+    }
+
+    if let Some(uid) = settings.bubblewrap_uid {
+        args.push(OsString::from("--uid"));
+        args.push(uid.to_string().into());
+    }
+    if let Some(gid) = settings.bubblewrap_gid {
+        args.push(OsString::from("--gid"));
+        args.push(gid.to_string().into());
+    }
+
+    for cap in &settings.bubblewrap_drop_capabilities {
+        args.push(OsString::from("--cap-drop"));
+        args.push(OsString::from(cap));
+    }
+
+    args.push(OsString::from("--setenv"));
+    args.push(OsString::from("PATH"));
+    args.push(OsString::from("/usr/bin:/bin:/sbin"));
+    args.push(OsString::from("--setenv"));
+    args.push(OsString::from("BKG_SANDBOX_ID"));
+    args.push(OsString::from(sandbox_id.to_string()));
+
+    if let Some(profile) = seccomp_profile {
+        args.push(OsString::from("--seccomp"));
+        args.push(profile.into());
+    }
+
+    args.push(OsString::from("--"));
+    args.push(OsString::from(&request.command));
+    for arg in &request.args {
+        args.push(OsString::from(arg));
+    }
+
+    args
 }
 
 fn sanitize_component(input: &str) -> String {
@@ -1163,6 +1280,9 @@ fn sanitize_component(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use tempfile::tempdir;
 
     #[test]
     fn build_seccomp_allowlist_deduplicates_entries() {
@@ -1257,5 +1377,63 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains("sandbox_created")));
         assert!(lines.iter().any(|line| line.contains("sandbox_exec")));
         assert!(lines.iter().any(|line| line.contains("sandbox_deleted")));
+    }
+
+    #[test]
+    fn bubblewrap_arguments_respect_isolation_settings() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let ro = temp.path().join("ro");
+        fs::create_dir_all(&ro).expect("ro");
+        let dev = temp.path().join("dev");
+        fs::create_dir_all(&dev).expect("dev");
+        let tmp_mount = temp.path().join("tmpfs");
+        fs::create_dir_all(&tmp_mount).expect("tmpfs");
+        let seccomp_path = temp.path().join("profile.seccomp");
+        fs::write(&seccomp_path, b"").expect("seccomp");
+
+        let mut settings = IsolationSettings::default();
+        settings.bubblewrap_unshare = vec!["user".into(), "pid".into()];
+        settings.bubblewrap_drop_capabilities = vec!["CAP_NET_ADMIN".into()];
+        settings.bubblewrap_readonly_paths = vec![ro.clone()];
+        settings.bubblewrap_dev_paths = vec![dev.clone()];
+        settings.bubblewrap_tmpfs_paths = vec![tmp_mount.clone()];
+        settings.bubblewrap_uid = Some(1234);
+        settings.bubblewrap_gid = Some(5678);
+        settings.bubblewrap_proc_path = Some(PathBuf::from("/proc"));
+
+        let request = ExecRequest {
+            command: "echo".into(),
+            args: vec!["hello".into()],
+            stdin: None,
+            timeout: None,
+        };
+
+        let args = bubblewrap_arguments(
+            &request,
+            &workspace,
+            Uuid::new_v4(),
+            Some(seccomp_path.as_path()),
+            &settings,
+        );
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.contains(&"--unshare-user".to_string()));
+        assert!(args.contains(&"--unshare-pid".to_string()));
+        assert!(args.contains(&"--cap-drop".to_string()));
+        assert!(args.contains(&"CAP_NET_ADMIN".to_string()));
+        assert!(args.contains(&ro.display().to_string()));
+        assert!(args.contains(&dev.display().to_string()));
+        assert!(args.contains(&tmp_mount.display().to_string()));
+        assert!(args.contains(&"1234".to_string()));
+        assert!(args.contains(&"5678".to_string()));
+        assert!(args.contains(&"--seccomp".to_string()));
+        assert!(args.contains(&seccomp_path.display().to_string()));
+        assert!(args.ends_with(&["echo".into(), "hello".into()]));
     }
 }
