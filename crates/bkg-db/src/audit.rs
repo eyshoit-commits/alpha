@@ -4,7 +4,7 @@ use std::{
     ffi::OsStr,
     fmt,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Lines, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -84,6 +84,19 @@ impl AuditLogVerifier {
         self.verify_reader(reader)
     }
 
+    /// Lazily verifies each line from the reader, yielding results as they are parsed.
+    pub fn stream_reader<R: BufRead>(&self, reader: R) -> AuditLogStream<R> {
+        AuditLogStream::new(self.clone(), reader)
+    }
+
+    /// Opens a file on disk and returns an iterator that lazily verifies each entry.
+    pub fn stream_file<P: AsRef<Path>>(&self, path: P) -> Result<AuditLogStream<BufReader<File>>> {
+        let file = File::open(path.as_ref())
+            .with_context(|| format!("opening audit log {}", path.as_ref().display()))?;
+        let reader = BufReader::new(file);
+        Ok(self.stream_reader(reader))
+    }
+
     fn verify_parsed_line(&self, line: AuditLogLine) -> Result<VerifiedAuditLine> {
         match (self.key.as_deref(), line.hmac.as_ref()) {
             (Some(key), _) => line.verify_hmac(key).context("verifying audit log HMAC")?,
@@ -122,6 +135,50 @@ impl From<AuditLogLine> for VerifiedAuditLine {
             payload: line.envelope.payload,
             hmac: line.hmac,
         }
+    }
+}
+
+/// Iterator that yields verified audit log lines in a streaming fashion.
+pub struct AuditLogStream<R: BufRead> {
+    verifier: AuditLogVerifier,
+    reader: Lines<R>,
+    line_number: usize,
+}
+
+impl<R: BufRead> AuditLogStream<R> {
+    fn new(verifier: AuditLogVerifier, reader: R) -> Self {
+        Self {
+            verifier,
+            reader: reader.lines(),
+            line_number: 0,
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for AuditLogStream<R> {
+    type Item = Result<VerifiedAuditLine>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_line = self.reader.next()?;
+        self.line_number += 1;
+
+        let raw = match next_line {
+            Ok(line) => line,
+            Err(err) => {
+                return Some(Err(anyhow!(
+                    "reading audit log line {}: {}",
+                    self.line_number,
+                    err
+                )));
+            }
+        };
+
+        let result = self
+            .verifier
+            .verify_line(&raw)
+            .with_context(|| format!("validating audit log line {}", self.line_number));
+
+        Some(result)
     }
 }
 
@@ -516,8 +573,9 @@ mod tests {
     use chrono::DateTime;
     use jsonschema::JSONSchema;
     use serde_json::json;
-    use std::{fs, path::PathBuf};
+    use std::{fs, io::Cursor, path::PathBuf, sync::Arc};
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     #[test]
     fn emitted_lines_validate_against_schema() {
@@ -704,6 +762,90 @@ mod tests {
         assert_eq!(entries[0].action, "create");
         assert_eq!(entries[1].action, "start");
         assert!(entries.iter().all(|entry| entry.hmac.is_none()));
+    }
+
+    #[test]
+    fn stream_file_iterates_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let key = b"stream-secret".to_vec();
+
+        let writer = Arc::new(
+            FileAuditLogWriter::new(FileAuditLogConfig {
+                path: path.clone(),
+                max_bytes: 1024 * 1024,
+                hmac_key: Some(key.clone()),
+                cosign: None,
+            })
+            .unwrap(),
+        );
+
+        let pipeline = AuditPipeline::new(writer);
+
+        let records = vec![
+            AuditRecord {
+                entity: "user".into(),
+                action: "create".into(),
+                payload: json!({"id": 1}),
+            },
+            AuditRecord {
+                entity: "user".into(),
+                action: "update".into(),
+                payload: json!({"id": 1, "field": "name"}),
+            },
+            AuditRecord {
+                entity: "user".into(),
+                action: "delete".into(),
+                payload: json!({"id": 1}),
+            },
+        ];
+
+        for record in &records {
+            pipeline.emit(record).unwrap();
+        }
+
+        let verifier = AuditLogVerifier::with_key(key);
+        let mut stream = verifier.stream_file(&path).unwrap();
+        let mut actions = Vec::new();
+
+        while let Some(entry) = stream.next() {
+            let line = entry.unwrap();
+            actions.push(line.action);
+        }
+
+        let expected: Vec<String> = records.iter().map(|record| record.action.clone()).collect();
+        assert_eq!(actions, expected);
+    }
+
+    #[test]
+    fn stream_reader_surfaces_errors() {
+        let verifier = AuditLogVerifier::new(None);
+        let valid_line = serde_json::to_string(&json!({
+            "version": AUDIT_LOG_VERSION,
+            "event_id": Uuid::nil().to_string(),
+            "timestamp": "2024-01-01T00:00:00Z",
+            "entity": "user",
+            "action": "valid",
+            "payload": {},
+        }))
+        .unwrap();
+
+        let invalid_line = serde_json::to_string(&json!({
+            "unexpected": true
+        }))
+        .unwrap();
+
+        let data = format!("{}\n{}\n", valid_line, invalid_line);
+        let cursor = Cursor::new(data.into_bytes());
+        let mut stream = verifier.stream_reader(cursor);
+
+        let first = stream.next().expect("first line");
+        assert!(first.is_ok(), "expected first line to verify successfully");
+
+        let second = stream.next().expect("second line");
+        assert!(second.is_err(), "expected parsing error for invalid line");
+
+        assert!(stream.next().is_none(), "no more lines expected");
     }
 
     #[test]
