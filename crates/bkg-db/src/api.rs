@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::TokenClaims,
+    auth::{JwtHmacAuth, TokenClaims},
     executor::{DefaultQueryExecutor, ExecutionContext, ExecutionResult, QueryExecutor},
     planner::{LogicalOptimizer, LogicalPlan, LogicalPlanner, PlannerDraft},
     rls::RlsPolicyEngine,
@@ -49,6 +49,7 @@ pub struct EmbeddedRestApi {
     planner: PlannerDraft,
     executor: DefaultQueryExecutor,
     policy_engine: Arc<dyn RlsPolicyEngine>,
+    auth: Arc<JwtHmacAuth>,
 }
 
 impl EmbeddedRestApi {
@@ -56,6 +57,7 @@ impl EmbeddedRestApi {
         database: Database,
         context: ExecutionContext,
         policy_engine: Arc<dyn RlsPolicyEngine>,
+        auth: Arc<JwtHmacAuth>,
     ) -> Self {
         Self {
             database,
@@ -64,6 +66,7 @@ impl EmbeddedRestApi {
             planner: PlannerDraft::new(),
             executor: DefaultQueryExecutor::new(),
             policy_engine,
+            auth,
         }
     }
 
@@ -71,6 +74,30 @@ impl EmbeddedRestApi {
         let ast = self.parser.parse(sql)?;
         let logical = self.planner.build_logical_plan(&ast)?;
         self.planner.optimize(logical)
+    }
+
+    async fn ensure_active_key(&self, key_id: Uuid) -> Result<()> {
+        let record = self
+            .database
+            .fetch_api_key(key_id)
+            .await?
+            .ok_or_else(|| anyhow!("api key '{key_id}' not found"))?;
+
+        if record.revoked {
+            return Err(anyhow!("api key '{key_id}' is revoked"));
+        }
+
+        if let Some(expiry) = record.expires_at {
+            if expiry < Utc::now() {
+                return Err(anyhow!("api key '{key_id}' is expired"));
+            }
+        }
+
+        self.database
+            .touch_api_key_usage(key_id, Utc::now())
+            .await?;
+
+        Ok(())
     }
 
     fn policy_to_json(record: &RlsPolicyRecord) -> Value {
@@ -131,6 +158,20 @@ fn parse_claims(body: &Value) -> Result<TokenClaims> {
     })
 }
 
+fn claims_to_json(claims: &TokenClaims) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("subject".into(), Value::String(claims.subject.clone()));
+    obj.insert("scope".into(), Value::String(claims.scope.clone()));
+    obj.insert(
+        "issued_at".into(),
+        Value::String(claims.issued_at.to_rfc3339()),
+    );
+    if let Some(expires_at) = claims.expires_at {
+        obj.insert("expires_at".into(), Value::String(expires_at.to_rfc3339()));
+    }
+    Value::Object(obj)
+}
+
 #[async_trait]
 impl RestApiServer for EmbeddedRestApi {
     async fn handle_query(&self, body: Value) -> Result<ExecutionResult> {
@@ -152,11 +193,50 @@ impl RestApiServer for EmbeddedRestApi {
         Ok(result)
     }
 
-    async fn handle_auth(&self, _body: Value) -> Result<Value> {
-        Ok(json!({
-            "status": "not_implemented",
-            "message": "Auth endpoint wiring pending"
-        }))
+    async fn handle_auth(&self, body: Value) -> Result<Value> {
+        let action = body
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("'action' field is required"))?;
+
+        match action {
+            "issue" => {
+                let claims = parse_claims(&body)?;
+                if let Some(key_id_value) = body.get("key_id") {
+                    let key_id = key_id_value
+                        .as_str()
+                        .ok_or_else(|| anyhow!("'key_id' must be a string"))?;
+                    let key_id =
+                        Uuid::parse_str(key_id).map_err(|err| anyhow!("invalid key_id: {err}"))?;
+                    self.ensure_active_key(key_id).await?;
+                }
+                let token = self.auth.issue(&claims)?;
+                Ok(json!({
+                    "token": token,
+                    "claims": claims_to_json(&claims)
+                }))
+            }
+            "verify" => {
+                let token = body
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("'token' field is required"))?;
+                let claims = self.auth.verify(token)?;
+                if let Some(key_id_value) = body.get("key_id") {
+                    let key_id = key_id_value
+                        .as_str()
+                        .ok_or_else(|| anyhow!("'key_id' must be a string"))?;
+                    let key_id =
+                        Uuid::parse_str(key_id).map_err(|err| anyhow!("invalid key_id: {err}"))?;
+                    self.ensure_active_key(key_id).await?;
+                }
+                Ok(json!({
+                    "valid": true,
+                    "claims": claims_to_json(&claims)
+                }))
+            }
+            other => Err(anyhow!("unsupported auth action '{other}'")),
+        }
     }
 
     async fn handle_policy(&self, body: Value) -> Result<Value> {
@@ -268,6 +348,7 @@ mod tests {
     use crate::executor::{ExecutionContext, ScalarValue};
     use crate::kernel::InMemoryStorageEngine;
     use crate::rls::DatabasePolicyEngine;
+    use crate::ApiKeyScope;
     use serde_json::json;
 
     const TEST_DB_URL: &str = "sqlite::memory:";
@@ -276,7 +357,8 @@ mod tests {
         let database = Database::connect(TEST_DB_URL).await.unwrap();
         let context = ExecutionContext::new(InMemoryStorageEngine::new());
         let policy_engine = Arc::new(DatabasePolicyEngine::new(database.clone()));
-        EmbeddedRestApi::new(database, context, policy_engine)
+        let auth = Arc::new(JwtHmacAuth::new("secret-key"));
+        EmbeddedRestApi::new(database, context, policy_engine, auth)
     }
 
     #[tokio::test]
@@ -306,6 +388,89 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], ScalarValue::Int64(1));
+    }
+
+    #[tokio::test]
+    async fn auth_endpoint_issues_and_verifies_tokens() {
+        let api = setup_rest_api().await;
+        let record = api
+            .database
+            .insert_api_key(
+                "hash-123",
+                "adm-123",
+                ApiKeyScope::Admin,
+                100,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let issued = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": "user-42",
+                    "scope": "admin"
+                },
+                "key_id": record.id.to_string()
+            }))
+            .await
+            .unwrap();
+
+        let token = issued["token"].as_str().unwrap();
+        assert!(!token.is_empty());
+        assert_eq!(issued["claims"]["subject"].as_str().unwrap(), "user-42");
+
+        let verified = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": token
+            }))
+            .await
+            .unwrap();
+
+        assert!(verified["valid"].as_bool().unwrap());
+        assert_eq!(verified["claims"]["scope"].as_str().unwrap(), "admin");
+
+        let refreshed = api
+            .database
+            .fetch_api_key(record.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(refreshed.last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn auth_endpoint_rejects_invalid_token() {
+        let api = setup_rest_api().await;
+        let err = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": "definitely-invalid"
+            }))
+            .await
+            .expect_err("should reject invalid token");
+        assert!(err.to_string().contains("invalid jwt"));
+    }
+
+    #[tokio::test]
+    async fn auth_endpoint_rejects_unknown_key() {
+        let api = setup_rest_api().await;
+        let err = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": "user-42",
+                    "scope": "admin"
+                },
+                "key_id": Uuid::new_v4().to_string()
+            }))
+            .await
+            .expect_err("should fail for unknown key");
+        assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]
