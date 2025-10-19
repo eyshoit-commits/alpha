@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    auth::TokenClaims,
+    auth::{JwtHmacAuth, JwtIssuer, JwtValidator, TokenClaims},
     executor::{DefaultQueryExecutor, ExecutionContext, ExecutionResult, QueryExecutor},
     planner::{LogicalOptimizer, LogicalPlan, LogicalPlanner, PlannerDraft},
     rls::RlsPolicyEngine,
@@ -49,6 +49,7 @@ pub struct EmbeddedRestApi {
     planner: PlannerDraft,
     executor: DefaultQueryExecutor,
     policy_engine: Arc<dyn RlsPolicyEngine>,
+    auth: Arc<JwtHmacAuth>,
 }
 
 impl EmbeddedRestApi {
@@ -56,6 +57,7 @@ impl EmbeddedRestApi {
         database: Database,
         context: ExecutionContext,
         policy_engine: Arc<dyn RlsPolicyEngine>,
+        auth: Arc<JwtHmacAuth>,
     ) -> Self {
         Self {
             database,
@@ -64,6 +66,7 @@ impl EmbeddedRestApi {
             planner: PlannerDraft::new(),
             executor: DefaultQueryExecutor::new(),
             policy_engine,
+            auth,
         }
     }
 
@@ -131,6 +134,20 @@ fn parse_claims(body: &Value) -> Result<TokenClaims> {
     })
 }
 
+fn claims_to_json(claims: &TokenClaims) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("subject".to_string(), Value::String(claims.subject.clone()));
+    obj.insert("scope".to_string(), Value::String(claims.scope.clone()));
+    obj.insert(
+        "issued_at".to_string(),
+        Value::String(claims.issued_at.to_rfc3339()),
+    );
+    if let Some(exp) = claims.expires_at {
+        obj.insert("expires_at".to_string(), Value::String(exp.to_rfc3339()));
+    }
+    Value::Object(obj)
+}
+
 #[async_trait]
 impl RestApiServer for EmbeddedRestApi {
     async fn handle_query(&self, body: Value) -> Result<ExecutionResult> {
@@ -152,11 +169,42 @@ impl RestApiServer for EmbeddedRestApi {
         Ok(result)
     }
 
-    async fn handle_auth(&self, _body: Value) -> Result<Value> {
-        Ok(json!({
-            "status": "not_implemented",
-            "message": "Auth endpoint wiring pending"
-        }))
+    async fn handle_auth(&self, body: Value) -> Result<Value> {
+        let action = body
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("issue");
+
+        match action {
+            "issue" => {
+                let claims = parse_claims(&body)?;
+                let token = self.auth.issue(&claims)?;
+
+                if let Ok(key_id) = Uuid::parse_str(&claims.subject) {
+                    if self.database.fetch_api_key(key_id).await?.is_some() {
+                        self.database
+                            .touch_api_key_usage(key_id, claims.issued_at)
+                            .await?;
+                    }
+                }
+
+                Ok(json!({
+                    "token": token,
+                    "claims": claims_to_json(&claims),
+                }))
+            }
+            "verify" => {
+                let token = body
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("'token' field is required"))?;
+                let claims = self.auth.verify(token)?;
+                Ok(json!({
+                    "claims": claims_to_json(&claims),
+                }))
+            }
+            other => Err(anyhow!("unsupported auth action '{other}'")),
+        }
     }
 
     async fn handle_policy(&self, body: Value) -> Result<Value> {
@@ -272,16 +320,18 @@ mod tests {
 
     const TEST_DB_URL: &str = "sqlite::memory:";
 
-    async fn setup_rest_api() -> EmbeddedRestApi {
+    async fn setup_rest_api() -> (EmbeddedRestApi, Database) {
         let database = Database::connect(TEST_DB_URL).await.unwrap();
         let context = ExecutionContext::new(InMemoryStorageEngine::new());
         let policy_engine = Arc::new(DatabasePolicyEngine::new(database.clone()));
-        EmbeddedRestApi::new(database, context, policy_engine)
+        let auth = Arc::new(JwtHmacAuth::new("secret-key"));
+        let api = EmbeddedRestApi::new(database.clone(), context, policy_engine, auth);
+        (api, database)
     }
 
     #[tokio::test]
     async fn rest_api_executes_sql_queries() {
-        let api = setup_rest_api().await;
+        let (api, _) = setup_rest_api().await;
 
         api.handle_query(json!({
             "sql": "INSERT INTO projects (id, name) VALUES (1, 'alpha')",
@@ -310,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_api_manages_rls_policies() {
-        let api = setup_rest_api().await;
+        let (api, _) = setup_rest_api().await;
 
         let initial = api
             .handle_policy(json!({
@@ -358,6 +408,113 @@ mod tests {
             .await
             .unwrap();
         assert!(empty["policies"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rest_api_issues_and_verifies_tokens() {
+        use crate::ApiKeyScope;
+
+        let (api, database) = setup_rest_api().await;
+        let record = database
+            .insert_api_key(
+                "hash-123",
+                "hash-",
+                ApiKeyScope::Admin,
+                120,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let issued_at = Utc::now();
+        let expires_at = issued_at + chrono::Duration::hours(1);
+        let issue_response = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": record.id.to_string(),
+                    "scope": "admin",
+                    "issued_at": issued_at.to_rfc3339(),
+                    "expires_at": expires_at.to_rfc3339(),
+                }
+            }))
+            .await
+            .unwrap();
+
+        let token = issue_response["token"].as_str().unwrap();
+        let issued_claims = issue_response["claims"].as_object().unwrap();
+        assert_eq!(
+            issued_claims["subject"].as_str().unwrap(),
+            record.id.to_string()
+        );
+        assert_eq!(issued_claims["scope"].as_str().unwrap(), "admin");
+
+        let stored = database.fetch_api_key(record.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_used_at, Some(issued_at));
+
+        let verify_response = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": token
+            }))
+            .await
+            .unwrap();
+
+        let verified = verify_response["claims"].as_object().unwrap();
+        assert_eq!(verified["subject"].as_str().unwrap(), record.id.to_string());
+        assert_eq!(verified["scope"].as_str().unwrap(), "admin");
+        assert_eq!(
+            verified["issued_at"].as_str().unwrap(),
+            issued_claims["issued_at"].as_str().unwrap()
+        );
+        assert_eq!(
+            verified["expires_at"].as_str().unwrap(),
+            issued_claims["expires_at"].as_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn rest_api_rejects_invalid_auth_payloads() {
+        let (api, _) = setup_rest_api().await;
+
+        let missing_claims = api
+            .handle_auth(json!({
+                "action": "issue"
+            }))
+            .await
+            .unwrap_err();
+        assert!(missing_claims
+            .to_string()
+            .contains("'claims' object is required"));
+
+        let missing_token = api
+            .handle_auth(json!({
+                "action": "verify"
+            }))
+            .await
+            .unwrap_err();
+        assert!(missing_token
+            .to_string()
+            .contains("'token' field is required"));
+
+        let invalid_token = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": "invalid-token"
+            }))
+            .await
+            .unwrap_err();
+        assert!(invalid_token.to_string().contains("invalid jwt"));
+
+        let unsupported = api
+            .handle_auth(json!({
+                "action": "unknown"
+            }))
+            .await
+            .unwrap_err();
+        assert!(unsupported.to_string().contains("unsupported auth action"));
     }
 
     #[test]
