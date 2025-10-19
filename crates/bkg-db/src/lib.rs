@@ -40,6 +40,8 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use audit::{AuditPipeline, AuditRecord};
+
 /// Default SQLite busy timeout in milliseconds when the DB is under load.
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
@@ -55,6 +57,7 @@ pub enum DatabaseDriver {
 pub struct Database {
     pool: AnyPool,
     driver: DatabaseDriver,
+    audit: Option<AuditPipeline>,
 }
 
 impl Database {
@@ -101,7 +104,11 @@ impl Database {
             }
         }
 
-        Ok(Self { pool, driver })
+        Ok(Self {
+            pool,
+            driver,
+            audit: None,
+        })
     }
 
     /// Connects to a file path via `sqlite://` scheme.
@@ -119,6 +126,30 @@ impl Database {
     /// Returns the configured driver for this database handle.
     pub fn driver(&self) -> DatabaseDriver {
         self.driver
+    }
+
+    /// Installs an audit pipeline that will receive structured events.
+    pub fn with_audit_pipeline(mut self, pipeline: AuditPipeline) -> Self {
+        self.audit = Some(pipeline);
+        self
+    }
+
+    /// Configures the audit pipeline on an existing database handle.
+    pub fn set_audit_pipeline(&mut self, pipeline: AuditPipeline) {
+        self.audit = Some(pipeline);
+    }
+
+    /// Returns the currently configured audit pipeline, if any.
+    pub fn audit_pipeline(&self) -> Option<&AuditPipeline> {
+        self.audit.as_ref()
+    }
+
+    /// Emits an audit record if a pipeline is configured.
+    pub fn emit_audit(&self, record: &AuditRecord) -> Result<()> {
+        if let Some(pipeline) = &self.audit {
+            pipeline.emit(record)?;
+        }
+        Ok(())
     }
 
     /// Retrieves an API key by identifier.
