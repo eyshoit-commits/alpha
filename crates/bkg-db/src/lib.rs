@@ -29,7 +29,7 @@ use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::{
     any::{AnyPoolOptions, AnyRow},
     migrate::MigrateError,
@@ -152,6 +152,19 @@ impl Database {
         Ok(())
     }
 
+    fn emit_structured_audit(&self, entity: &str, action: &str, payload: Value) -> Result<()> {
+        if self.audit.is_none() {
+            return Ok(());
+        }
+
+        let record = AuditRecord {
+            entity: entity.to_owned(),
+            action: action.to_owned(),
+            payload,
+        };
+        self.emit_audit(&record)
+    }
+
     /// Retrieves an API key by identifier.
     pub async fn fetch_api_key(&self, id: Uuid) -> Result<Option<ApiKeyRecord>> {
         let select = match self.driver {
@@ -230,9 +243,16 @@ impl Database {
             }
         };
 
-        self.fetch_api_key(id)
+        let stored = self
+            .fetch_api_key(id)
             .await?
-            .ok_or_else(|| anyhow!("api key inserted but missing when reloaded ({id})"))
+            .ok_or_else(|| anyhow!("api key inserted but missing when reloaded ({id})"))?;
+
+        let payload =
+            serde_json::to_value(&stored).context("serialize audit payload for api key insert")?;
+        self.emit_structured_audit("api_keys", "insert", payload)?;
+
+        Ok(stored)
     }
 
     /// Retrieves an API key by its hashed token value (sha256).
@@ -272,6 +292,14 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        if self.audit.is_some() {
+            let payload = match self.fetch_api_key(id).await? {
+                Some(record) => serde_json::to_value(&record)
+                    .context("serialize audit payload for api key revoke")?,
+                None => json!({ "id": id, "status": "missing" }),
+            };
+            self.emit_structured_audit("api_keys", "revoke", payload)?;
+        }
         Ok(())
     }
 
@@ -286,6 +314,14 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        self.emit_structured_audit(
+            "api_keys",
+            "touch_usage",
+            json!({
+                "id": id,
+                "last_used_at": timestamp,
+            }),
+        )?;
         Ok(())
     }
 
@@ -342,7 +378,7 @@ impl Database {
         }
 
         let payload_value = serde_json::from_str(payload)?;
-        Ok(WebhookEventRecord {
+        let record = WebhookEventRecord {
             id,
             new_key_id,
             previous_key_id,
@@ -351,7 +387,13 @@ impl Database {
             signature: signature.to_string(),
             created_at,
             delivered: false,
-        })
+        };
+
+        let payload = serde_json::to_value(&record)
+            .context("serialize audit payload for key rotation event insert")?;
+        self.emit_structured_audit("key_rotation_events", "insert", payload)?;
+
+        Ok(record)
     }
 
     /// Lists queued key-rotation webhook events.
@@ -416,12 +458,16 @@ impl Database {
                 .execute(&self.pool)
                 .await?;
 
-            self.fetch_rls_policy(existing.id).await?.ok_or_else(|| {
+            let updated = self.fetch_rls_policy(existing.id).await?.ok_or_else(|| {
                 anyhow!(
                     "rls policy updated but missing when reloaded ({})",
                     existing.id
                 )
-            })
+            })?;
+            let payload = serde_json::to_value(&updated)
+                .context("serialize audit payload for rls policy update")?;
+            self.emit_structured_audit("rls_policies", "update", payload)?;
+            Ok(updated)
         } else {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -454,9 +500,14 @@ impl Database {
                 .execute(&self.pool)
                 .await?;
 
-            self.fetch_rls_policy(id)
+            let created = self
+                .fetch_rls_policy(id)
                 .await?
-                .ok_or_else(|| anyhow!("rls policy inserted but missing when reloaded ({id})"))
+                .ok_or_else(|| anyhow!("rls policy inserted but missing when reloaded ({id})"))?;
+            let payload = serde_json::to_value(&created)
+                .context("serialize audit payload for rls policy insert")?;
+            self.emit_structured_audit("rls_policies", "insert", payload)?;
+            Ok(created)
         }
     }
 
@@ -530,6 +581,11 @@ impl Database {
 
     /// Removes a stored RLS policy.
     pub async fn delete_rls_policy(&self, id: Uuid) -> Result<()> {
+        let snapshot = if self.audit.is_some() {
+            self.fetch_rls_policy(id).await?
+        } else {
+            None
+        };
         let delete = match self.driver {
             DatabaseDriver::Sqlite => "DELETE FROM rls_policies WHERE id = ?",
             DatabaseDriver::Postgres => "DELETE FROM rls_policies WHERE id = $1",
@@ -538,6 +594,12 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        let payload = match snapshot {
+            Some(record) => serde_json::to_value(&record)
+                .context("serialize audit payload for rls policy delete")?,
+            None => json!({ "id": id, "status": "missing" }),
+        };
+        self.emit_structured_audit("rls_policies", "delete", payload)?;
         Ok(())
     }
 
@@ -621,13 +683,17 @@ impl Database {
                 }
             })?;
 
-        self.fetch_sandbox(id).await?.ok_or_else(|| {
+        let record = self.fetch_sandbox(id).await?.ok_or_else(|| {
             anyhow!(
                 "sandbox inserted but missing when reloaded (namespace={}, name={})",
                 data.namespace,
                 data.name
             )
-        })
+        })?;
+        let payload =
+            serde_json::to_value(&record).context("serialize audit payload for sandbox create")?;
+        self.emit_structured_audit("sandboxes", "create", payload)?;
+        Ok(record)
     }
 
     /// Retrieves a sandbox by its identifier.
@@ -726,6 +792,15 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        self.emit_structured_audit(
+            "sandboxes",
+            "update_status",
+            json!({
+                "id": id,
+                "status": status.as_str(),
+                "updated_at": now,
+            }),
+        )?;
         Ok(())
     }
 
@@ -754,6 +829,14 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        self.emit_structured_audit(
+            "sandboxes",
+            "touch_last_started",
+            json!({
+                "id": id,
+                "last_started_at": now,
+            }),
+        )?;
         Ok(())
     }
 
@@ -782,11 +865,24 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        self.emit_structured_audit(
+            "sandboxes",
+            "touch_last_stopped",
+            json!({
+                "id": id,
+                "last_stopped_at": now,
+            }),
+        )?;
         Ok(())
     }
 
     /// Removes a sandbox (and cascading executions) from the catalog.
     pub async fn delete_sandbox(&self, id: Uuid) -> Result<()> {
+        let snapshot = if self.audit.is_some() {
+            self.fetch_sandbox(id).await?
+        } else {
+            None
+        };
         let delete = match self.driver {
             DatabaseDriver::Sqlite => "DELETE FROM sandboxes WHERE id = ?",
             DatabaseDriver::Postgres => "DELETE FROM sandboxes WHERE id = $1",
@@ -795,6 +891,12 @@ impl Database {
             .bind(encode_uuid(id))
             .execute(&self.pool)
             .await?;
+        let payload = match snapshot {
+            Some(record) => serde_json::to_value(&record)
+                .context("serialize audit payload for sandbox delete")?,
+            None => json!({ "id": id, "status": "missing" }),
+        };
+        self.emit_structured_audit("sandboxes", "delete", payload)?;
         Ok(())
     }
 
@@ -812,6 +914,15 @@ impl Database {
             timed_out,
         } = entry;
         let args_json = serde_json::to_string(&args).context("serialize execution args")?;
+        let audit_payload = json!({
+            "sandbox_id": sandbox_id,
+            "executed_at": executed_at,
+            "command": command.clone(),
+            "args": args.clone(),
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+        });
         let query = match self.driver {
             DatabaseDriver::Sqlite => {
                 r#"
@@ -842,6 +953,7 @@ impl Database {
             .bind(timed_out)
             .execute(&self.pool)
             .await?;
+        self.emit_structured_audit("sandbox_executions", "insert", audit_payload)?;
         Ok(())
     }
 
@@ -1383,13 +1495,38 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use audit::AuditLogWriter;
     use chrono::Utc;
+    use parking_lot::Mutex;
     use serde_json::json;
+    use std::sync::Arc;
 
     const TEST_DB_URL: &str = "sqlite::memory:";
 
     async fn setup_db() -> Database {
         Database::connect(TEST_DB_URL).await.unwrap()
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingWriter {
+        events: Arc<Mutex<Vec<AuditRecord>>>,
+    }
+
+    impl RecordingWriter {
+        fn new(events: Arc<Mutex<Vec<AuditRecord>>>) -> Self {
+            Self { events }
+        }
+    }
+
+    impl AuditLogWriter for RecordingWriter {
+        fn append(&self, record: &AuditRecord) -> Result<()> {
+            self.events.lock().push(record.clone());
+            Ok(())
+        }
+
+        fn rotate(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -1499,6 +1636,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_api_key_emits_audit_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::new(RecordingWriter::new(events.clone()));
+        let db = setup_db()
+            .await
+            .with_audit_pipeline(AuditPipeline::new(writer));
+
+        let scope = ApiKeyScope::Namespace {
+            namespace: "audit-team".into(),
+        };
+
+        let record = db
+            .insert_api_key("audit-hash", "audit-prefix", scope, 10, None, None, None)
+            .await
+            .unwrap();
+
+        let captured = events.lock();
+        assert_eq!(captured.len(), 1);
+        let event = &captured[0];
+        assert_eq!(event.entity, "api_keys");
+        assert_eq!(event.action, "insert");
+        let record_id = record.id.to_string();
+        assert_eq!(event.payload["id"].as_str(), Some(record_id.as_str()));
+        assert_eq!(event.payload["rate_limit"].as_u64(), Some(10));
+    }
+
+    #[tokio::test]
     async fn rls_policy_persistence_roundtrip() {
         let db = setup_db().await;
         let expression = json!({
@@ -1549,5 +1713,53 @@ mod tests {
 
         let empty = db.list_rls_policies(Some("projects")).await.unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_execution_emits_audit_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::new(RecordingWriter::new(events.clone()));
+        let db = setup_db()
+            .await
+            .with_audit_pipeline(AuditPipeline::new(writer));
+
+        let sandbox = db
+            .create_sandbox(NewSandbox::with_limits(
+                "ns-audit",
+                "runner",
+                "process",
+                ResourceLimits::default(),
+            ))
+            .await
+            .unwrap();
+
+        events.lock().clear();
+
+        let entry = ExecutionRecord {
+            sandbox_id: sandbox.id,
+            executed_at: Utc::now(),
+            command: "echo".into(),
+            args: vec!["hello".into()],
+            exit_code: Some(0),
+            stdout: Some("hello\n".into()),
+            stderr: None,
+            duration_ms: 12,
+            timed_out: false,
+        };
+
+        db.record_execution(entry.clone()).await.unwrap();
+
+        let captured = events.lock();
+        assert_eq!(captured.len(), 1);
+        let event = &captured[0];
+        assert_eq!(event.entity, "sandbox_executions");
+        assert_eq!(event.action, "insert");
+        let sandbox_id = sandbox.id.to_string();
+        assert_eq!(
+            event.payload["sandbox_id"].as_str(),
+            Some(sandbox_id.as_str())
+        );
+        assert_eq!(event.payload["command"], json!("echo"));
+        assert_eq!(event.payload["timed_out"], json!(false));
     }
 }

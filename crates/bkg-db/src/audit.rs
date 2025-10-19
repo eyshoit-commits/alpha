@@ -350,19 +350,17 @@ struct AuditLogLine {
 
 fn rotated_log_path(path: &Path) -> PathBuf {
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let suffix = Uuid::new_v4();
     let parent = path.parent().map(Path::to_path_buf);
-    let rotated_name = match (path.file_stem(), path.extension()) {
-        (Some(stem), Some(ext)) => format!(
-            "{}-{}-{}.{}",
-            stem.to_string_lossy(),
-            timestamp,
-            suffix,
-            ext.to_string_lossy()
-        ),
-        (Some(stem), None) => format!("{}-{}-{}", stem.to_string_lossy(), timestamp, suffix),
-        _ => format!("audit-{}-{}", timestamp, suffix),
-    };
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audit");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jsonl");
+
+    let rotated_name = format!("{}.{}.{}", stem, timestamp, extension);
 
     parent
         .unwrap_or_else(|| PathBuf::from("."))
@@ -373,8 +371,78 @@ fn rotated_log_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use chrono::DateTime;
+    use jsonschema::JSONSchema;
+    use serde_json::json;
     use std::{fs, path::PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn emitted_lines_validate_against_schema() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let config = FileAuditLogConfig {
+            path: path.clone(),
+            max_bytes: 4096,
+            hmac_key: Some(b"schema-secret".to_vec()),
+            cosign: None,
+        };
+        let writer = FileAuditLogWriter::new(config).unwrap();
+
+        let record = AuditRecord {
+            entity: "api_keys".into(),
+            action: "insert".into(),
+            payload: json!({"id": 1}),
+        };
+
+        writer.append(&record).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let raw_line = contents.lines().next().unwrap();
+        let value: Value = serde_json::from_str(raw_line).unwrap();
+
+        let schema = json!({
+            "type": "object",
+            "required": [
+                "version",
+                "event_id",
+                "timestamp",
+                "entity",
+                "action",
+                "payload"
+            ],
+            "properties": {
+                "version": {"type": "string"},
+                "event_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+                },
+                "timestamp": {"type": "string", "format": "date-time"},
+                "entity": {"type": "string"},
+                "action": {"type": "string"},
+                "payload": {
+                    "oneOf": [
+                        {"type": "object"},
+                        {"type": "array"},
+                        {"type": "string"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "null"}
+                    ]
+                },
+                "hmac": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9+/]+$"
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let compiled = JSONSchema::compile(&schema).unwrap();
+        if let Err(errors) = compiled.validate(&value) {
+            let messages: Vec<String> = errors.map(|error| format!("{}", error)).collect();
+            panic!("schema validation failed: {:?}", messages);
+        }
+    }
 
     #[test]
     fn writes_signed_entries() {
@@ -391,7 +459,7 @@ mod tests {
         let record = AuditRecord {
             entity: "api_keys".into(),
             action: "insert".into(),
-            payload: serde_json::json!({"id": 1}),
+            payload: json!({"id": 1}),
         };
 
         writer.append(&record).unwrap();
@@ -426,7 +494,7 @@ mod tests {
         let record = AuditRecord {
             entity: "sandboxes".into(),
             action: "delete".into(),
-            payload: serde_json::json!({"id": 42}),
+            payload: json!({"id": 42}),
         };
         writer.append(&record).unwrap();
 
@@ -450,12 +518,12 @@ mod tests {
         let record_a = AuditRecord {
             entity: "sandboxes".into(),
             action: "create".into(),
-            payload: serde_json::json!({"namespace": "alpha"}),
+            payload: json!({"namespace": "alpha"}),
         };
         let record_b = AuditRecord {
             entity: "sandboxes".into(),
             action: "start".into(),
-            payload: serde_json::json!({"namespace": "alpha"}),
+            payload: json!({"namespace": "alpha"}),
         };
 
         writer.append(&record_a).unwrap();
@@ -470,7 +538,7 @@ mod tests {
 
         let rotated_file = entries
             .iter()
-            .find(|name| name.starts_with("audit-") && name.ends_with(".jsonl"))
+            .find(|name| name.starts_with("audit.") && name.ends_with(".jsonl"))
             .expect("rotated audit log present");
         let rotated_contents = std::fs::read_to_string(dir.path().join(rotated_file)).unwrap();
         let rotated_line_count = rotated_contents.lines().count();
@@ -529,12 +597,12 @@ fi
         let record_a = AuditRecord {
             entity: "sandboxes".into(),
             action: "create".into(),
-            payload: serde_json::json!({"namespace": "alpha"}),
+            payload: json!({"namespace": "alpha"}),
         };
         let record_b = AuditRecord {
             entity: "sandboxes".into(),
             action: "start".into(),
-            payload: serde_json::json!({"namespace": "alpha"}),
+            payload: json!({"namespace": "alpha"}),
         };
 
         writer.append(&record_a).unwrap();
@@ -550,7 +618,7 @@ fi
             .filter(|path| {
                 path.file_name()
                     .and_then(OsStr::to_str)
-                    .map(|name| name.starts_with("audit-") && name.ends_with(".jsonl"))
+                    .map(|name| name.starts_with("audit.") && name.ends_with(".jsonl"))
                     .unwrap_or(false)
             })
             .collect();
