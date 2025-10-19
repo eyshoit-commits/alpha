@@ -8,11 +8,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_slice, Map, Number, Value};
+use serde_json::{from_slice, json, Map, Number, Value};
 
 use crate::auth::TokenClaims;
 use crate::kernel::{InMemoryStorageEngine, StorageEngine, StorageTransaction, TransactionMode};
 use crate::planner::{AggregatePlan, ComparisonOp, FilterExpr, FilterKind, LogicalPlan};
+use crate::realtime::{ChangeEvent, SharedRealtimeHub};
 use crate::rls::{RlsPolicy, RlsPolicyEngine};
 
 // TODO(bkg-db/executor): Streaming Iterator API, echte MVCC-Leseansichten,
@@ -23,6 +24,7 @@ use crate::rls::{RlsPolicy, RlsPolicyEngine};
 pub struct ExecutionContext {
     storage: InMemoryStorageEngine,
     tables: Arc<RwLock<HashMap<String, TableData>>>,
+    realtime: Option<SharedRealtimeHub>,
 }
 
 impl ExecutionContext {
@@ -31,9 +33,22 @@ impl ExecutionContext {
     }
 
     pub fn try_new(storage: InMemoryStorageEngine) -> Result<Self> {
+        Self::try_new_with_realtime(storage, None)
+    }
+
+    pub fn with_realtime(storage: InMemoryStorageEngine, hub: SharedRealtimeHub) -> Self {
+        Self::try_new_with_realtime(storage, Some(hub))
+            .expect("failed to initialize ExecutionContext with realtime")
+    }
+
+    fn try_new_with_realtime(
+        storage: InMemoryStorageEngine,
+        realtime: Option<SharedRealtimeHub>,
+    ) -> Result<Self> {
         let ctx = Self {
             storage,
             tables: Arc::new(RwLock::new(HashMap::new())),
+            realtime,
         };
         ctx.replay_wal()?;
         Ok(ctx)
@@ -41,6 +56,10 @@ impl ExecutionContext {
 
     pub fn wal_entries(&self) -> usize {
         self.storage.wal_entries()
+    }
+
+    pub fn realtime(&self) -> Option<SharedRealtimeHub> {
+        self.realtime.clone()
     }
 
     /// Returns lightweight metadata describing the currently managed tables.
@@ -256,6 +275,8 @@ fn execute_insert(
 
     let mut tx = ctx.storage.begin_transaction(TransactionMode::ReadWrite)?;
 
+    let mut events = Vec::new();
+
     {
         let mut tables = ctx.tables.write();
         let entry = tables.entry(table.to_string()).or_default();
@@ -287,10 +308,13 @@ fn execute_insert(
             let wal_entry = WalEntry::insert(table, &entry.columns, row.clone());
             let payload = serde_json::to_vec(&wal_entry)?;
             tx.append_log(&payload)?;
+            events.push(wal_entry_to_change_event(&wal_entry)?);
         }
     }
 
     tx.commit()?;
+
+    publish_change_events(ctx, events)?;
 
     Ok(ExecutionResult {
         rows_affected: values.len() as u64,
@@ -364,6 +388,7 @@ fn execute_update(
     }
 
     let mut affected = 0u64;
+    let mut events = Vec::new();
     for row in entry.rows.iter_mut() {
         if filter_matches(&prepared_filter, row)?
             && row_allowed(engine, policies, claims, &entry.columns, row)?
@@ -382,11 +407,14 @@ fn execute_update(
             let wal_entry = WalEntry::update(table, &entry.columns, before, updated);
             let payload = serde_json::to_vec(&wal_entry)?;
             tx.append_log(&payload)?;
+            events.push(wal_entry_to_change_event(&wal_entry)?);
             affected += 1;
         }
     }
 
     tx.commit()?;
+
+    publish_change_events(ctx, events)?;
 
     Ok(ExecutionResult {
         rows_affected: affected,
@@ -426,13 +454,17 @@ fn execute_delete(
 
     entry.rows = kept;
 
+    let mut events = Vec::new();
     for row in &removed {
         let wal_entry = WalEntry::delete(table, &entry.columns, row.clone());
         let payload = serde_json::to_vec(&wal_entry)?;
         tx.append_log(&payload)?;
+        events.push(wal_entry_to_change_event(&wal_entry)?);
     }
 
     tx.commit()?;
+
+    publish_change_events(ctx, events)?;
 
     Ok(ExecutionResult {
         rows_affected: removed.len() as u64,
@@ -477,6 +509,52 @@ fn scalar_to_value(value: &ScalarValue) -> Result<Value> {
         ScalarValue::String(v) => Value::String(v.clone()),
         ScalarValue::Null => Value::Null,
     })
+}
+
+fn wal_entry_to_change_event(entry: &WalEntry) -> Result<ChangeEvent> {
+    let row_before = entry
+        .row_before
+        .as_ref()
+        .map(|row| row_to_json(&entry.columns, row))
+        .transpose()?;
+    let row_after = entry
+        .row_after
+        .as_ref()
+        .map(|row| row_to_json(&entry.columns, row))
+        .transpose()?;
+
+    let kind = match entry.event {
+        WalEventKind::Insert => "insert",
+        WalEventKind::Update => "update",
+        WalEventKind::Delete => "delete",
+    };
+
+    let payload = json!({
+        "kind": kind,
+        "table": entry.table,
+        "columns": entry.columns,
+        "row_before": row_before,
+        "row_after": row_after,
+    });
+
+    Ok(ChangeEvent {
+        channel: entry.table.clone(),
+        payload,
+    })
+}
+
+fn publish_change_events(ctx: &ExecutionContext, events: Vec<ChangeEvent>) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(hub) = ctx.realtime() {
+        for event in events {
+            hub.publish(event)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

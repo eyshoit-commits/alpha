@@ -76,14 +76,14 @@ Review-Check am 2025-10-19: README §"Tests, CI & Release Artefakte" sowie PROMP
   Status: Konzept ausstehend; Migration-Tooling/Docs fehlen (`docs/bkg-db.md`).
 - [ ] API-Layer: HTTP (`/query`, `/auth`, `/policy`, `/schema`), pgwire, gRPC.  
   Status: Nur Platzhalter-Module vorgesehen, keine Server-Implementierung (`crates/bkg-db`).
-- [ ] Realtime/CDC: WAL-basierte Subscriptions via WebSocket/SSE.  
-  Status: Kein Realtime-Hub implementiert.
+- [ ] Realtime/CDC: WAL-basierte Subscriptions via WebSocket/SSE.
+  Status: WAL-Replay publiziert jetzt `ChangeEvent`s über einen Broadcast-Hub (`WalRealtimeHub`) inklusive Tests für Insert/Update/Delete und Teardown (`crates/bkg-db/src/realtime.rs:1-301`, `crates/bkg-db/src/executor.rs:22-360`). WebSocket/SSE-Anbindung steht noch aus.
 - [ ] Objekt-Storage: Buckets, presigned URLs, Backend-Abstraktion.  
   Status: Nicht gestartet (`storage.rs` fehlt).
 - [ ] Admin-UI (`web/admin`): Next.js Dashboard mit Tabs *Overview · Policies · Users · Telemetry · Audit*.
   Status: Next.js Dashboard mit Lifecycle-/Key-/Telemetry-Ansichten umgesetzt (`web/admin/src/app`); Audit-Tabs & tiefe Integration mit produktiven Backends fehlen.
-- [ ] Telemetry & Audit: OTEL-Export, cosign-signierte JSONL-Logs.  
-  Status: Keine Module (`telemetry.rs`, `audit.rs`) vorhanden.
+- [ ] Telemetry & Audit: OTEL-Export, cosign-signierte JSONL-Logs.
+  Status: Telemetrie-Exporter nutzt nun OTLP + Sampling-Builder inkl. Tests (`crates/bkg-db/src/telemetry.rs:1-259`); Audit-Logging bleibt offen.
 - [ ] CI & Supply Chain: Make Targets (`lint`, `test`, `sbom`, `slsa`, `sign`, `api-validate`) und pipeline scripts.  
   Status: Makefile/CI-Konfiguration nicht vorhanden; `docs/bkg-db.md` definiert Zielzustand.
 
