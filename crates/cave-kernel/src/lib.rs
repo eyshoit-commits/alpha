@@ -827,6 +827,30 @@ struct ProcessSandboxInstance {
     seccomp: Option<SeccompContext>,
 }
 
+struct OverlayMountGuard<'a> {
+    dirs: &'a OverlayDirs,
+    sandbox_id: Uuid,
+}
+
+impl<'a> OverlayMountGuard<'a> {
+    fn new(dirs: &'a OverlayDirs, sandbox_id: Uuid) -> Result<Self> {
+        mount_overlay(dirs)?;
+        Ok(Self { dirs, sandbox_id })
+    }
+}
+
+impl<'a> Drop for OverlayMountGuard<'a> {
+    fn drop(&mut self) {
+        if let Err(err) = unmount_overlay(self.dirs) {
+            warn!(
+                sandbox = %self.sandbox_id,
+                error = %err,
+                "failed to unmount overlay",
+            );
+        }
+    }
+}
+
 impl ProcessSandboxInstance {
     fn new(
         sandbox_id: Uuid,
@@ -859,18 +883,20 @@ impl SandboxInstance for ProcessSandboxInstance {
             .unwrap_or_else(|| Duration::from_secs(self.limits.timeout_seconds as u64));
 
         let mut active_workspace = self.workspace_root.as_path();
-        let mut overlay_mounted = false;
-        if let Some(dirs) = self.overlay.as_ref() {
-            match mount_overlay(dirs) {
-                Ok(()) => {
-                    overlay_mounted = true;
+        let _overlay_guard = if let Some(dirs) = self.overlay.as_ref() {
+            match OverlayMountGuard::new(dirs, self.sandbox_id) {
+                Ok(guard) => {
                     active_workspace = dirs.merged.as_path();
+                    Some(guard)
                 }
                 Err(err) => {
                     warn!(sandbox = %self.sandbox_id, error = %err, "failed to mount overlay");
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
         let mut command = if self.runtime.isolation.enable_namespaces {
             if let Some(bwrap) = self.runtime.bubblewrap_path.as_ref() {
@@ -924,17 +950,6 @@ impl SandboxInstance for ProcessSandboxInstance {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
-                if overlay_mounted {
-                    if let Some(dirs) = self.overlay.as_ref() {
-                        if let Err(unmount_err) = unmount_overlay(dirs) {
-                            warn!(
-                                sandbox = %self.sandbox_id,
-                                error = %unmount_err,
-                                "failed to unmount overlay after spawn error"
-                            );
-                        }
-                    }
-                }
                 return Err(err.into());
             }
         };
@@ -1058,15 +1073,6 @@ impl SandboxInstance for ProcessSandboxInstance {
             duration,
             timed_out,
         });
-
-        if overlay_mounted {
-            if let Some(dirs) = self.overlay.as_ref() {
-                if let Err(err) = unmount_overlay(dirs) {
-                    warn!(sandbox = %self.sandbox_id, error = %err, "failed to unmount overlay");
-                }
-            }
-        }
-
         result
     }
 
