@@ -382,6 +382,28 @@ struct AuditLogLine {
     hmac: Option<String>,
 }
 
+impl AuditLogLine {
+    fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec(&self.envelope).context("serializing audit envelope")
+    }
+
+    fn verify_hmac(&self, key: &[u8]) -> Result<()> {
+        let signature = self
+            .hmac
+            .as_ref()
+            .ok_or_else(|| anyhow!("audit log entry is not signed"))?;
+        let signature_bytes = STANDARD_NO_PAD
+            .decode(signature.as_bytes())
+            .context("decoding audit log HMAC")?;
+
+        let mut mac =
+            HmacSha256::new_from_slice(key).context("initializing audit log HMAC verifier")?;
+        mac.update(&self.canonical_bytes()?);
+        mac.verify_slice(&signature_bytes)
+            .map_err(|_| anyhow!("audit log HMAC verification failed"))
+    }
+}
+
 fn rotated_log_path(path: &Path) -> PathBuf {
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
     let parent = path.parent().map(Path::to_path_buf);
@@ -505,12 +527,7 @@ mod tests {
         assert_eq!(line.envelope.action, "insert");
         assert!(Uuid::parse_str(&line.envelope.event_id).is_ok());
         DateTime::parse_from_rfc3339(&line.envelope.timestamp.to_rfc3339()).unwrap();
-
-        let canonical = serde_json::to_vec(&line.envelope).unwrap();
-        let mut mac = HmacSha256::new_from_slice(b"super-secret").unwrap();
-        mac.update(&canonical);
-        let expected = STANDARD_NO_PAD.encode(mac.finalize().into_bytes());
-        assert_eq!(line.hmac.as_deref(), Some(expected.as_str()));
+        line.verify_hmac(b"super-secret").unwrap();
     }
 
     #[test]
@@ -671,5 +688,35 @@ fi
         assert_eq!(sig_files.len(), 1);
         let signature_contents = std::fs::read_to_string(&sig_files[0]).unwrap();
         assert_eq!(signature_contents.trim(), "signed");
+    }
+
+    #[test]
+    fn tampering_is_detected_by_verifier() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let config = FileAuditLogConfig {
+            path: path.clone(),
+            max_bytes: 4096,
+            hmac_key: Some(b"tamper-secret".to_vec()),
+            cosign: None,
+        };
+        let writer = FileAuditLogWriter::new(config).unwrap();
+
+        let record = AuditRecord {
+            entity: "api_keys".into(),
+            action: "insert".into(),
+            payload: json!({"id": 1}),
+        };
+
+        writer.append(&record).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line: AuditLogLine = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        line.verify_hmac(b"tamper-secret").unwrap();
+
+        let mut tampered = line.clone();
+        tampered.envelope.payload = json!({"id": 2});
+        let error = tampered.verify_hmac(b"tamper-secret").unwrap_err();
+        assert!(error.to_string().contains("verification failed"));
     }
 }
