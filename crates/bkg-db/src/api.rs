@@ -17,7 +17,7 @@ use crate::{
     planner::{LogicalOptimizer, LogicalPlan, LogicalPlanner, PlannerDraft},
     rls::RlsPolicyEngine,
     sql::{DefaultSqlParser, SqlParser},
-    Database, NewRlsPolicy, RlsPolicyRecord,
+    ApiKeyScope, Database, NewRlsPolicy, RlsPolicyRecord,
 };
 
 // TODO(bkg-db/api): Implement REST, pgwire und gRPC Server inkl. Auth & RLS Hooks.
@@ -87,8 +87,12 @@ impl EmbeddedRestApi {
         })
     }
 
-    async fn record_api_key_usage(&self, subject: &str, timestamp: DateTime<Utc>) -> Result<()> {
-        let key_id = match Uuid::parse_str(subject) {
+    async fn record_api_key_usage(
+        &self,
+        claims: &TokenClaims,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        let key_id = match Uuid::parse_str(&claims.subject) {
             Ok(id) => id,
             Err(err) => return Err(anyhow!("claims.subject must be a UUID: {err}")),
         };
@@ -108,6 +112,8 @@ impl EmbeddedRestApi {
                 ));
             }
         }
+
+        validate_claim_scope(&record.scope, &claims.scope)?;
 
         self.database.touch_api_key_usage(key_id, timestamp).await?;
 
@@ -183,6 +189,35 @@ fn claims_to_json(claims: &TokenClaims) -> Value {
     Value::Object(obj)
 }
 
+fn validate_claim_scope(expected: &ApiKeyScope, provided: &str) -> Result<()> {
+    match expected {
+        ApiKeyScope::Admin => {
+            if provided == "admin" {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "claims.scope '{provided}' does not match admin API key scope"
+                ))
+            }
+        }
+        ApiKeyScope::Namespace { namespace } => {
+            let Some(claim_namespace) = provided.strip_prefix("namespace:") else {
+                return Err(anyhow!(
+                    "claims.scope '{provided}' must be 'namespace:<name>' for namespace keys"
+                ));
+            };
+
+            if claim_namespace == namespace {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "claims.scope '{provided}' does not match namespace '{namespace}'"
+                ))
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl RestApiServer for EmbeddedRestApi {
     async fn handle_query(&self, body: Value) -> Result<ExecutionResult> {
@@ -215,8 +250,7 @@ impl RestApiServer for EmbeddedRestApi {
                 let claims = parse_claims(&body)?;
                 let token = self.auth.issue(&claims)?;
 
-                self.record_api_key_usage(&claims.subject, claims.issued_at)
-                    .await?;
+                self.record_api_key_usage(&claims, claims.issued_at).await?;
 
                 Ok(json!({
                     "token": token,
@@ -229,8 +263,7 @@ impl RestApiServer for EmbeddedRestApi {
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow!("'token' field is required"))?;
                 let claims = self.auth.verify(token)?;
-                self.record_api_key_usage(&claims.subject, Utc::now())
-                    .await?;
+                self.record_api_key_usage(&claims, Utc::now()).await?;
                 Ok(json!({
                     "claims": claims_to_json(&claims),
                 }))
@@ -352,18 +385,18 @@ mod tests {
 
     const TEST_DB_URL: &str = "sqlite::memory:";
 
-    async fn setup_rest_api() -> (EmbeddedRestApi, Database) {
+    async fn setup_rest_api() -> (EmbeddedRestApi, Database, Arc<JwtHmacAuth>) {
         let database = Database::connect(TEST_DB_URL).await.unwrap();
         let context = ExecutionContext::new(InMemoryStorageEngine::new());
         let policy_engine = Arc::new(DatabasePolicyEngine::new(database.clone()));
         let auth = Arc::new(JwtHmacAuth::new("secret-key"));
-        let api = EmbeddedRestApi::new(database.clone(), context, policy_engine, auth);
-        (api, database)
+        let api = EmbeddedRestApi::new(database.clone(), context, policy_engine, auth.clone());
+        (api, database, auth)
     }
 
     #[tokio::test]
     async fn rest_api_executes_sql_queries() {
-        let (api, _) = setup_rest_api().await;
+        let (api, _, _) = setup_rest_api().await;
 
         api.handle_query(json!({
             "sql": "INSERT INTO projects (id, name) VALUES (1, 'alpha')",
@@ -392,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_api_manages_rls_policies() {
-        let (api, _) = setup_rest_api().await;
+        let (api, _, _) = setup_rest_api().await;
 
         let initial = api
             .handle_policy(json!({
@@ -446,7 +479,7 @@ mod tests {
     async fn rest_api_issues_and_verifies_tokens() {
         use crate::ApiKeyScope;
 
-        let (api, database) = setup_rest_api().await;
+        let (api, database, _) = setup_rest_api().await;
         let record = database
             .insert_api_key(
                 "hash-123",
@@ -514,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_api_rejects_invalid_auth_payloads() {
-        let (api, _) = setup_rest_api().await;
+        let (api, _, _) = setup_rest_api().await;
 
         let missing_claims = api
             .handle_auth(json!({
@@ -588,7 +621,7 @@ mod tests {
     async fn rest_api_issue_rejects_missing_or_revoked_keys() {
         use crate::ApiKeyScope;
 
-        let (api, database) = setup_rest_api().await;
+        let (api, database, _) = setup_rest_api().await;
         let unknown_id = Uuid::new_v4();
 
         let missing_key = api
@@ -631,10 +664,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_api_issue_rejects_scope_mismatch() {
+        use crate::ApiKeyScope;
+
+        let (api, database, _) = setup_rest_api().await;
+
+        let admin_record = database
+            .insert_api_key(
+                "hash-admin",
+                "hash-admin-prefix",
+                ApiKeyScope::Admin,
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let admin_scope_err = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": admin_record.id.to_string(),
+                    "scope": "namespace:alpha"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(admin_scope_err
+            .to_string()
+            .contains("does not match admin API key scope"));
+
+        let namespace_record = database
+            .insert_api_key(
+                "hash-namespace",
+                "hash-namespace-prefix",
+                ApiKeyScope::Namespace {
+                    namespace: "namespace:alpha".into(),
+                },
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let missing_prefix_err = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": namespace_record.id.to_string(),
+                    "scope": "namespace"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(missing_prefix_err
+            .to_string()
+            .contains("must be 'namespace:<name>'"));
+
+        let wrong_namespace_err = api
+            .handle_auth(json!({
+                "action": "issue",
+                "claims": {
+                    "subject": namespace_record.id.to_string(),
+                    "scope": "namespace:beta"
+                }
+            }))
+            .await
+            .unwrap_err();
+        assert!(wrong_namespace_err
+            .to_string()
+            .contains("does not match namespace"));
+    }
+
+    #[tokio::test]
     async fn rest_api_issue_rejects_expired_keys() {
         use crate::ApiKeyScope;
 
-        let (api, database) = setup_rest_api().await;
+        let (api, database, _) = setup_rest_api().await;
         let expired_at = Utc::now() - chrono::Duration::hours(1);
         let record = database
             .insert_api_key(
@@ -666,8 +776,7 @@ mod tests {
     async fn rest_api_verify_rejects_invalid_keys() {
         use crate::ApiKeyScope;
 
-        let (api, database) = setup_rest_api().await;
-        let auth = JwtHmacAuth::new("secret-key");
+        let (api, database, auth) = setup_rest_api().await;
 
         let bogus_claims = TokenClaims {
             subject: Uuid::new_v4().to_string(),
@@ -719,6 +828,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(revoked_err.to_string().contains("revoked"));
+
+        let scope_record = database
+            .insert_api_key(
+                "hash-scope",
+                "hash-scope-prefix",
+                ApiKeyScope::Namespace {
+                    namespace: "namespace:alpha".into(),
+                },
+                60,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mismatched_claims = TokenClaims {
+            subject: scope_record.id.to_string(),
+            scope: "namespace:beta".into(),
+            issued_at: Utc::now(),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        };
+        let mismatched_token = auth.issue(&mismatched_claims).unwrap();
+
+        let scope_err = api
+            .handle_auth(json!({
+                "action": "verify",
+                "token": mismatched_token
+            }))
+            .await
+            .unwrap_err();
+        assert!(scope_err.to_string().contains("does not match namespace"));
     }
 
     #[test]
