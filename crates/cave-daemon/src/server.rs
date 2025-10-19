@@ -14,12 +14,18 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use bkg_db::{Database, ExecutionRecord, ResourceLimits, SandboxRecord};
+use bkg_db::{
+    AuditEventFilter, AuditEventRecord, Database, ExecutionRecord, ModelDownloadJobRecord,
+    ModelRecord, ModelStage, NewAuditEvent, NewModel, NewModelDownloadJob, ResourceLimits,
+    SandboxRecord,
+};
 use cave_kernel::{
     AuditConfig, CaveKernel, CreateSandboxRequest, ExecOutcome, ExecRequest, IsolationSettings,
     KernelConfig, KernelError, ProcessSandboxRuntime,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
@@ -79,6 +85,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sandboxes/:id/status", get(get_sandbox))
         .route("/api/v1/sandboxes/:id/executions", get(list_executions))
         .route("/api/v1/sandboxes/:id", delete(delete_sandbox))
+        .route("/api/v1/models", get(list_models).post(register_model))
+        .route("/api/v1/models/:id/refresh", post(refresh_model))
+        .route("/api/v1/models/:id", delete(delete_model))
+        .route("/api/v1/models/:id/jobs", get(list_model_jobs))
+        .route("/api/v1/audit/events", get(list_audit_events))
         .route("/api/v1/auth/keys", post(issue_key).get(list_keys))
         .route("/api/v1/auth/keys/rotate", post(rotate_key))
         .route("/api/v1/auth/keys/rotated", post(verify_rotation_webhook))
@@ -581,6 +592,410 @@ async fn list_executions(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/models",
+    responses(
+        (status = 200, description = "List registered models", body = [ModelResponse]),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn list_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ModelResponse>>, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let records = state.db.list_models().await.map_err(ApiError::internal)?;
+    Ok(Json(records.into_iter().map(ModelResponse::from).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/models",
+    request_body = RegisterModelBody,
+    responses(
+        (status = 201, description = "Model registered", body = ModelResponse),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn register_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RegisterModelBody>,
+) -> Result<(StatusCode, Json<ModelResponse>), ApiError> {
+    let issuer = state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let RegisterModelBody {
+        name,
+        provider,
+        version,
+        format,
+        source_uri,
+        checksum_sha256,
+        size_bytes,
+        tags,
+    } = payload;
+
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("model name cannot be empty"));
+    }
+
+    let provider = provider.trim().to_string();
+    if provider.is_empty() {
+        return Err(ApiError::bad_request("provider cannot be empty"));
+    }
+
+    let version = version.trim().to_string();
+    if version.is_empty() {
+        return Err(ApiError::bad_request("version cannot be empty"));
+    }
+
+    let format = format.trim().to_string();
+    if format.is_empty() {
+        return Err(ApiError::bad_request("format cannot be empty"));
+    }
+
+    let source_uri = source_uri.trim().to_string();
+    if source_uri.is_empty() {
+        return Err(ApiError::bad_request("source_uri cannot be empty"));
+    }
+
+    let checksum_sha256 = checksum_sha256.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    let mut tags_vec: Vec<String> = tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    tags_vec.sort();
+    tags_vec.dedup();
+    let tags_slice = if tags_vec.is_empty() {
+        None
+    } else {
+        Some(tags_vec.as_slice())
+    };
+
+    let checksum_ref = checksum_sha256.as_deref();
+    let now = Utc::now();
+    let model = state
+        .db
+        .insert_model(NewModel {
+            name: &name,
+            provider: &provider,
+            version: &version,
+            format: &format,
+            source_uri: &source_uri,
+            checksum_sha256: checksum_ref,
+            size_bytes,
+            tags: tags_slice,
+            stage: ModelStage::Ready,
+            last_synced_at: Some(now),
+            error_message: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    state
+        .db
+        .insert_model_job(NewModelDownloadJob {
+            model_id: model.id,
+            stage: ModelStage::Ready,
+            progress: 1.0,
+            started_at: now,
+            finished_at: Some(now),
+            error_message: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    let actor_id = issuer.id.to_string();
+    let audit_payload = json!({
+        "model_id": model.id,
+        "name": model.name,
+        "provider": model.provider,
+        "version": model.version,
+        "stage": model.stage.as_str(),
+    });
+    state
+        .db
+        .record_audit_event(NewAuditEvent {
+            namespace: None,
+            actor: Some(actor_id.as_str()),
+            event_type: "model.registered",
+            recorded_at: now,
+            payload: &audit_payload,
+            signature_valid: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok((StatusCode::CREATED, Json(ModelResponse::from(model))))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/models/{id}/refresh",
+    params(("id" = Uuid, Path, description = "Model identifier")),
+    responses(
+        (status = 200, description = "Model refreshed", body = ModelResponse),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Model not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn refresh_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ModelResponse>, ApiError> {
+    let issuer = state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let existing = state
+        .db
+        .fetch_model(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "model not found"))?;
+
+    let now = Utc::now();
+    state
+        .db
+        .insert_model_job(NewModelDownloadJob {
+            model_id: id,
+            stage: ModelStage::Ready,
+            progress: 1.0,
+            started_at: now,
+            finished_at: Some(now),
+            error_message: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    let updated = state
+        .db
+        .update_model_stage(id, ModelStage::Ready, Some(now), None)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "model not found"))?;
+
+    let actor_id = issuer.id.to_string();
+    let audit_payload = json!({
+        "model_id": id,
+        "previous_stage": existing.stage.as_str(),
+        "stage": ModelStage::Ready.as_str(),
+        "name": existing.name,
+    });
+    state
+        .db
+        .record_audit_event(NewAuditEvent {
+            namespace: None,
+            actor: Some(actor_id.as_str()),
+            event_type: "model.refreshed",
+            recorded_at: now,
+            payload: &audit_payload,
+            signature_valid: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(Json(ModelResponse::from(updated)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/models/{id}",
+    params(("id" = Uuid, Path, description = "Model identifier")),
+    responses(
+        (status = 204, description = "Model deleted"),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Model not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn delete_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let issuer = state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let record = state
+        .db
+        .fetch_model(id)
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "model not found"))?;
+
+    if !state
+        .db
+        .delete_model(id)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "model not found"));
+    }
+
+    let actor_id = issuer.id.to_string();
+    let audit_payload = json!({
+        "model_id": id,
+        "name": record.name,
+        "provider": record.provider,
+        "version": record.version,
+    });
+    state
+        .db
+        .record_audit_event(NewAuditEvent {
+            namespace: None,
+            actor: Some(actor_id.as_str()),
+            event_type: "model.deleted",
+            recorded_at: Utc::now(),
+            payload: &audit_payload,
+            signature_valid: None,
+        })
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/models/{id}/jobs",
+    params(("id" = Uuid, Path, description = "Model identifier")),
+    responses(
+        (status = 200, description = "List model jobs", body = [ModelJobResponse]),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody),
+        (status = 404, description = "Model not found", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn list_model_jobs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<ModelJobResponse>>, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    if state
+        .db
+        .fetch_model(id)
+        .await
+        .map_err(ApiError::internal)?
+        .is_none()
+    {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "model not found"));
+    }
+
+    let jobs = state
+        .db
+        .list_model_jobs(id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(jobs.into_iter().map(ModelJobResponse::from).collect()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/audit/events",
+    params(AuditEventsQuery),
+    responses(
+        (status = 200, description = "List audit events", body = [AuditEventResponse]),
+        (status = 400, description = "Invalid filters", body = ErrorBody),
+        (status = 401, description = "Missing or invalid credentials", body = ErrorBody),
+        (status = 403, description = "Insufficient permissions", body = ErrorBody)
+    ),
+    security(("bearerAuth" = []))
+)]
+async fn list_audit_events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<AuditEventsQuery>,
+) -> Result<Json<Vec<AuditEventResponse>>, ApiError> {
+    state
+        .auth
+        .authorize(require_bearer(&headers)?, ScopeRequirement::Admin)
+        .await
+        .map_err(ApiError::from)?;
+
+    let since = if let Some(value) = query.since.as_deref() {
+        Some(parse_rfc3339(value, "since")?)
+    } else {
+        None
+    };
+    let until = if let Some(value) = query.until.as_deref() {
+        Some(parse_rfc3339(value, "until")?)
+    } else {
+        None
+    };
+
+    if let (Some(since), Some(until)) = (since, until) {
+        if since > until {
+            return Err(ApiError::bad_request("since must be before until"));
+        }
+    }
+
+    let limit = query.limit.unwrap_or(50);
+    if limit == 0 {
+        return Err(ApiError::bad_request("limit must be greater than zero"));
+    }
+
+    let filter = AuditEventFilter {
+        namespace: query.namespace.as_deref(),
+        event_type: query.event_type.as_deref(),
+        limit: Some(limit),
+        since,
+        until,
+    };
+
+    let events = state
+        .db
+        .list_audit_events(filter)
+        .await
+        .map_err(ApiError::internal)?;
+
+    Ok(Json(
+        events.into_iter().map(AuditEventResponse::from).collect(),
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/auth/keys",
     request_body = CreateKeyBody,
@@ -992,6 +1407,166 @@ impl From<ExecutionRecord> for ExecutionResponse {
     }
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+struct RegisterModelBody {
+    name: String,
+    provider: String,
+    version: String,
+    format: String,
+    source_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ModelStageResponse {
+    Unknown,
+    Registered,
+    Queued,
+    Downloading,
+    Verifying,
+    Ready,
+    Failed,
+}
+
+impl From<ModelStage> for ModelStageResponse {
+    fn from(stage: ModelStage) -> Self {
+        match stage {
+            ModelStage::Unknown => ModelStageResponse::Unknown,
+            ModelStage::Registered => ModelStageResponse::Registered,
+            ModelStage::Queued => ModelStageResponse::Queued,
+            ModelStage::Downloading => ModelStageResponse::Downloading,
+            ModelStage::Verifying => ModelStageResponse::Verifying,
+            ModelStage::Ready => ModelStageResponse::Ready,
+            ModelStage::Failed => ModelStageResponse::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ModelResponse {
+    id: Uuid,
+    name: String,
+    provider: String,
+    version: String,
+    format: String,
+    source_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum_sha256: Option<String>,
+    stage: ModelStageResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_synced_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+}
+
+impl From<ModelRecord> for ModelResponse {
+    fn from(record: ModelRecord) -> Self {
+        let tags = if record.tags.is_empty() {
+            None
+        } else {
+            Some(record.tags)
+        };
+
+        Self {
+            id: record.id,
+            name: record.name,
+            provider: record.provider,
+            version: record.version,
+            format: record.format,
+            source_uri: record.source_uri,
+            size_bytes: record.size_bytes,
+            checksum_sha256: record.checksum_sha256,
+            stage: ModelStageResponse::from(record.stage),
+            last_synced_at: record.last_synced_at.map(|ts| ts.to_rfc3339()),
+            created_at: record.created_at.to_rfc3339(),
+            updated_at: record.updated_at.to_rfc3339(),
+            tags,
+            error_message: record.error_message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ModelJobResponse {
+    id: Uuid,
+    model_id: Uuid,
+    stage: ModelStageResponse,
+    progress: f32,
+    started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+}
+
+impl From<ModelDownloadJobRecord> for ModelJobResponse {
+    fn from(record: ModelDownloadJobRecord) -> Self {
+        Self {
+            id: record.id,
+            model_id: record.model_id,
+            stage: ModelStageResponse::from(record.stage),
+            progress: record.progress,
+            started_at: record.started_at.to_rfc3339(),
+            finished_at: record.finished_at.map(|ts| ts.to_rfc3339()),
+            error_message: record.error_message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct AuditEventResponse {
+    id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    event_type: String,
+    recorded_at: String,
+    payload: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_valid: Option<bool>,
+}
+
+impl From<AuditEventRecord> for AuditEventResponse {
+    fn from(record: AuditEventRecord) -> Self {
+        Self {
+            id: record.id,
+            namespace: record.namespace,
+            actor: record.actor,
+            event_type: record.event_type,
+            recorded_at: record.recorded_at.to_rfc3339(),
+            payload: record.payload,
+            signature_valid: record.signature_valid,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, IntoParams, ToSchema)]
+struct AuditEventsQuery {
+    #[serde(default)]
+    namespace: Option<String>,
+    #[serde(default, rename = "event_type")]
+    event_type: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -1110,6 +1685,12 @@ pub mod docs {
             stop_sandbox,
             delete_sandbox,
             list_executions,
+            list_models,
+            register_model,
+            refresh_model,
+            delete_model,
+            list_model_jobs,
+            list_audit_events,
             issue_key,
             list_keys,
             rotate_key,
@@ -1125,6 +1706,12 @@ pub mod docs {
                 ExecBody,
                 ExecResponse,
                 ExecutionResponse,
+                RegisterModelBody,
+                ModelResponse,
+                ModelStageResponse,
+                ModelJobResponse,
+                AuditEventResponse,
+                AuditEventsQuery,
                 ErrorBody,
                 CreateKeyBody,
                 CreateKeyScope,
@@ -1187,6 +1774,12 @@ fn bearer_optional(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
     }
 }
 
+fn parse_rfc3339(value: &str, field: &str) -> Result<DateTime<Utc>, ApiError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| ApiError::bad_request(format!("invalid {field} timestamp")))
+}
+
 fn bool_env(key: &str) -> Option<bool> {
     env::var(key)
         .ok()
@@ -1202,11 +1795,12 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::TempDir;
     use tower::Service;
 
     use crate::auth::{AuthService, KeyScope, RotationWebhookPayload};
+    use bkg_db::AuditEventFilter;
 
     use std::sync::Arc;
 
@@ -1296,6 +1890,148 @@ mod tests {
         assert!(warning
             .unwrap()
             .contains("CAVE_OTEL_SAMPLING_RATE=-0.3 outside"));
+    }
+
+    #[tokio::test]
+    async fn register_model_creates_job_and_audit() {
+        let (state, mut router, _tmp) = setup_test_app().await;
+        let admin = state
+            .auth
+            .issue_key(KeyScope::Admin, 1000, None)
+            .await
+            .expect("admin key");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/models")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "name": "phi-3",
+                    "provider": "huggingface",
+                    "version": "1.0.0",
+                    "format": "gguf",
+                    "source_uri": "https://example.com/models/phi-3.gguf"
+                }))
+                .unwrap(),
+            ))
+            .expect("request");
+
+        let response = router.call(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let model_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(model_json["name"], "phi-3");
+        assert_eq!(model_json["stage"], "ready");
+        let model_id = Uuid::parse_str(model_json["id"].as_str().unwrap()).unwrap();
+
+        let list_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/models")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("list request");
+        let list_response = router.call(list_request).await.expect("list response");
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let models: Vec<Value> = serde_json::from_slice(&list_body).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], model_json["id"]);
+
+        let jobs_request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/models/{model_id}/jobs"))
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("jobs request");
+        let jobs_response = router.call(jobs_request).await.expect("jobs response");
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_body = to_bytes(jobs_response.into_body(), usize::MAX)
+            .await
+            .expect("jobs body");
+        let jobs: Vec<Value> = serde_json::from_slice(&jobs_body).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["stage"], "ready");
+        assert_eq!(jobs[0]["progress"].as_f64().unwrap(), 1.0);
+
+        let audit_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/audit/events")
+            .header("authorization", format!("Bearer {}", admin.token))
+            .body(Body::empty())
+            .expect("audit request");
+        let audit_response = router.call(audit_request).await.expect("audit response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let audit_body = to_bytes(audit_response.into_body(), usize::MAX)
+            .await
+            .expect("audit body");
+        let events: Vec<Value> = serde_json::from_slice(&audit_body).unwrap();
+        assert!(!events.is_empty());
+        assert_eq!(events[0]["event_type"], "model.registered");
+
+        let audit_events = state
+            .db
+            .list_audit_events(AuditEventFilter {
+                namespace: None,
+                event_type: Some("model.registered"),
+                limit: Some(5),
+                since: None,
+                until: None,
+            })
+            .await
+            .expect("audit events");
+        assert_eq!(audit_events.len(), 1);
+        assert_eq!(audit_events[0].event_type, "model.registered");
+    }
+
+    #[tokio::test]
+    async fn model_endpoints_require_admin_scope() {
+        let (state, mut router, _tmp) = setup_test_app().await;
+        let namespace = state
+            .auth
+            .issue_key(
+                KeyScope::Namespace {
+                    namespace: "team-alpha".into(),
+                },
+                120,
+                None,
+            )
+            .await
+            .expect("namespace key");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/models")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", namespace.token))
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "name": "phi-3",
+                    "provider": "huggingface",
+                    "version": "1.0.0",
+                    "format": "gguf",
+                    "source_uri": "https://example.com/models/phi-3.gguf"
+                }))
+                .unwrap(),
+            ))
+            .expect("request");
+
+        let response = router.call(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let audit_request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/audit/events")
+            .header("authorization", format!("Bearer {}", namespace.token))
+            .body(Body::empty())
+            .expect("audit request");
+        let audit_response = router.call(audit_request).await.expect("audit response");
+        assert_eq!(audit_response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
